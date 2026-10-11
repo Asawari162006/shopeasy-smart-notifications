@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "seed": 42,
+  "total_days": 210,
+  "customers": 600,
+  "notifications": 109031,
+  "subscription_events": 302,
+  "order_events": 28458,
+  "epoch": "2026-01-05T00:00:00+00:00",
+  "synthetic": true
+}

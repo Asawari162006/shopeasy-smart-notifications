@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "feature_schema": [
+    "open_rate_7d",
+    "open_rate_21d",
+    "trend_7d_vs_14d",
+    "open_rate_offer",
+    "open_rate_new_arrival",
+    "open_rate_price_drop",
+    "open_rate_order_update",
+    "consecutive_ignore_streak",
+    "days_since_last_open",
+    "avg_view_seconds",
+    "click_rate",
+    "mute_count",
+    "dismissed_share"
+  ],
+  "dataset_fingerprint": "c36b90944ef7139ff81f7a1197b8a4658f6aae23df3859c87cd2e5cb4be0ca7e",
+  "training_time": "2026-10-11T06:08:21.528327+00:00",
+  "versions": {
+    "python": "3.11.9",
+    "sklearn": "1.9.1",
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "joblib": "1.6.0"
+  },
+  "splits": {
+    "train": [
+      21,
+      98
+    ],
+    "validation": [
+      119,
+      147
+    ],
+    "test": [
+      168,
+      196
+    ]
+  },
+  "horizon_days": 14,
+  "min_future_exposure": 5,
+  "model_name": "KNN k=11",
+  "validation_thresholds": {
+    "medium": 0.22500000000000003,
+    "high": 0.45000000000000007
+  },
+  "probabilities_calibrated": false
+}
