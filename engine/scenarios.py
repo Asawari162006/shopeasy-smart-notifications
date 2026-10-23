@@ -5,8 +5,6 @@ and provides seeded sample actions that satisfy all acceptance criteria.
 """
 
 import random
-from datetime import timedelta
-from ml.features import EPOCH
 from engine.messages import get_message_for_customer
 
 CUSTOMERS = [
@@ -25,19 +23,13 @@ CUSTOMERS = [
 
 # Days and hours distribution for a week's 6 notifications
 WEEK_SCHEDULE = [
-    {"day_name": "Mon", "time": "10:15 AM"},
-    {"day_name": "Tue", "time": "2:30 PM"},
-    {"day_name": "Wed", "time": "6:45 PM"},
-    {"day_name": "Thu", "time": "11:20 AM"},
-    {"day_name": "Fri", "time": "5:10 PM"},
-    {"day_name": "Sat", "time": "1:00 PM"}
+    {"day_name": "Mon", "time": "10:15 AM", "slot": "morning"},
+    {"day_name": "Tue", "time": "2:30 PM", "slot": "afternoon"},
+    {"day_name": "Wed", "time": "6:45 PM", "slot": "evening"},
+    {"day_name": "Thu", "time": "11:20 AM", "slot": "morning"},
+    {"day_name": "Fri", "time": "5:10 PM", "slot": "evening"},
+    {"day_name": "Sat", "time": "1:00 PM", "slot": "afternoon"}
 ]
-
-
-def generate_order_lifecycle(customer_id, week_num, day_offset):
-    """Independent simulated shipment source; not a promotional volume filler."""
-    return {'id': f'{customer_id}_order_w{week_num}_shipped', 'customer_id': customer_id,
-            'lifecycle': 'shipped', 'timestamp': (EPOCH + timedelta(days=(week_num-1)*7+day_offset, hours=[10,14,18,11,17,13][day_offset], minutes=[15,30,45,20,10,0][day_offset])).isoformat()}
 
 
 def generate_week_notifications(customer_id, week_num):
@@ -57,26 +49,16 @@ def generate_week_notifications(customer_id, week_num):
 
     notifs = []
     for i, ntype in enumerate(types_list):
-        order_event = generate_order_lifecycle(customer_id, week_num, i) if ntype == 'order_update' else None
         sched = WEEK_SCHEDULE[i]
         # Unique non-repeating message index: week * 10 + i
         msg = get_message_for_customer(customer_id, ntype, (week_num - 1) * 6 + i)
-        if order_event:
-            msg = f"Simulated order SE-{week_num:04d} has shipped. Follow its delivery progress."
-            order_event['message'] = msg
         notifs.append({
             "id": f"{customer_id}_w{week_num}_n{i+1}",
             "type": ntype,
-            "notification_type": ntype,
-            "timestamp": (EPOCH + timedelta(days=(week_num - 1) * 7 + i, hours=[10,14,18,11,17,13][i], minutes=[15,30,45,20,10,0][i])).isoformat(),
-            "day": (week_num - 1) * 7 + i,
-            "hour": [10,14,18,11,17,13][i],
-            "duration_source": "simulated",
-            "order_event_id": order_event['id'] if order_event else None,
-            "order_event": order_event,
             "text": msg,
             "day_name": sched["day_name"],
             "time": sched["time"],
+            "slot": sched.get("slot", "afternoon"),
             "action": None,  # User fills this
             "duration": "few_seconds",
             "timing": "right_away",

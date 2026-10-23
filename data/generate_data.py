@@ -1,12 +1,10 @@
 """
 ShopEasy Smart Notifications - Synthetic Dataset Generator
-Simulates 600 customers over 210 days with synthetic engagement mechanics,
-muting, and explicit subscription events. Fully reproducible (seed=42).
+Simulates 600 customers over 90 days with realistic engagement mechanics,
+fatigue effects, muting, and unsubscribe patterns. Fully reproducible (seed=42).
 """
 
 import os
-import json
-from datetime import datetime, timedelta, timezone
 import math
 import random
 import numpy as np
@@ -65,7 +63,7 @@ WINDOWS = {
 }
 
 
-def generate_dataset(output_dir="data", reports_dir="reports", total_customers=600, total_days=210):
+def generate_dataset(output_dir="data", reports_dir="reports", total_customers=600, total_days=90):
     random.seed(SEED)
     np.random.seed(SEED)
 
@@ -111,10 +109,8 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
         os.path.join(output_dir, "customers.csv"), index=False
     )
 
-    # 2. Simulate notification and lifecycle events over the observation period.
+    # 2. Simulate notifications over 90 days
     notifications = []
-    subscription_events = []
-    order_events = []
     # Track state per customer
     # state: consecutive_promo_ignores, consecutive_ignores_by_type, muted_types, unsubscribed
     type_names = [t[0] for t in TYPE_MIX]
@@ -141,12 +137,10 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
             if persona == "quick_quitter":
                 if consecutive_promo_ignores >= 4 and random.random() < 0.40:
                     unsubscribed = True
-                    subscription_events.append({"customer_id": cid, "day": day, "hour": 0, "action": "unsubscribed"})
                     break
             else:
                 if consecutive_promo_ignores >= 10 and random.random() < 0.25:
                     unsubscribed = True
-                    subscription_events.append({"customer_id": cid, "day": day, "hour": 0, "action": "unsubscribed"})
                     break
 
             # Volume: Poisson(1.6) capped at 3
@@ -172,13 +166,6 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
                 else:
                     hour = random.randint(8, 22)
 
-                # A simulated shipment lifecycle event is the source of an order update.
-                # This independent event stream is never increased to fill a quota.
-                order_event_id = None
-                if chosen_type == 'order_update':
-                    order_event_id = f'order_{len(notifications)}_shipped'
-                    order_events.append({'id': order_event_id, 'customer_id': cid, 'day': day, 'hour': hour, 'lifecycle': 'shipped'})
-
                 # Compute base probability
                 base_p = BASE_PROBS[persona][chosen_type]
 
@@ -203,10 +190,10 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
                 win_mult = 1.2 if is_in_window else 0.7
                 p = base_p * win_mult
 
-                # Synthetic non-open streak multiplier; not measured psychological fatigue.
+                # Fatigue effect
                 if chosen_type != "order_update":
-                    streak_mult = max(0.40, (0.96 ** consecutive_promo_ignores))
-                    p = p * streak_mult
+                    fatigue_mult = max(0.40, (0.96 ** consecutive_promo_ignores))
+                    p = p * fatigue_mult
 
                 # Daily volume penalty if more than 2 in a day
                 if notif_idx >= 2:
@@ -308,25 +295,11 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
                     "clicked": clicked,
                     "saved": saved,
                     "muted_type": muted_event,
-                    "unsubscribed": 1 if unsubscribed else 0,
-                    "order_event_id": order_event_id
+                    "unsubscribed": 1 if unsubscribed else 0
                 })
 
     notif_df = pd.DataFrame(notifications)
-    epoch = datetime(2026, 1, 5, tzinfo=timezone.utc)
-    notif_df["timestamp"] = [(epoch + timedelta(days=int(d), hours=int(h))).isoformat() for d, h in zip(notif_df.day, notif_df.hour)]
-    notif_df["event_id"] = [f"synthetic_{i}" for i in range(len(notif_df))]
-    notif_df["duration_source"] = "simulated"
-    # Transactional notifications correspond to generated lifecycle events, never a quota.
-    orders = pd.DataFrame(order_events, columns=['id', 'customer_id', 'day', 'hour', 'lifecycle'])
-    orders['timestamp'] = [(epoch + timedelta(days=int(d), hours=int(h))).isoformat() for d,h in zip(orders.day,orders.hour)]
-    orders.to_csv(os.path.join(output_dir, 'order_events.csv'), index=False)
     notif_df.to_csv(os.path.join(output_dir, "notifications.csv"), index=False)
-    subscriptions = pd.DataFrame(subscription_events, columns=["customer_id", "day", "hour", "action"])
-    subscriptions["timestamp"] = [(epoch + timedelta(days=int(d))).isoformat() for d in subscriptions.day]
-    subscriptions.to_csv(os.path.join(output_dir, "subscription_events.csv"), index=False)
-    with open(os.path.join(output_dir, "dataset_metadata.json"), "w") as f:
-        json.dump({"schema_version": 2, "seed": SEED, "total_days": total_days, "customers": len(cust_df), "notifications": len(notif_df), "subscription_events": len(subscriptions), "order_events": len(orders), "epoch": epoch.isoformat(), "synthetic": True}, f, indent=2)
 
     # 3. Print Data Summary
     print("=" * 60)
@@ -359,7 +332,7 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
     plt.figure(figsize=(10, 6))
     for col in weekly_persona_open.columns:
         plt.plot(weekly_persona_open.index, weekly_persona_open[col], label=col, linewidth=2)
-    plt.title(f"Synthetic Weekly Open Rate by Persona ({total_days} Days)", fontsize=14, fontweight='bold')
+    plt.title("Average Weekly Open Rate by Persona (90 Days)", fontsize=14, fontweight='bold')
     plt.xlabel("Week", fontsize=12)
     plt.ylabel("Open Rate", fontsize=12)
     plt.grid(True, linestyle="--", alpha=0.5)
@@ -373,15 +346,16 @@ def generate_dataset(output_dir="data", reports_dir="reports", total_customers=6
     # Chart 2: Share unsubscribed over time
     # For each day, count how many customers have stopped receiving notifications because of unsubscribe
     # We find unsubscribe day for each customer who unsubscribed
-    unsub_customers = set(subscriptions.customer_id)
+    unsub_records = notif_df.groupby('customer_id')['unsubscribed'].max()
+    unsub_customers = set(unsub_records[unsub_records == 1].index)
     # The day after last notification is unsubscribe day (or day where unsubscribed==1)
-    last_day_per_cust = subscriptions.set_index('customer_id')['day']
+    last_day_per_cust = notif_df.groupby('customer_id')['day'].max()
 
     days_axis = list(range(total_days))
     unsub_shares = []
     for d in days_axis:
-        unsubscribed_so_far = sum(1 for cid in unsub_customers if last_day_per_cust[cid] <= d)
-        unsub_shares.append(unsubscribed_so_far / total_customers)
+        churned_so_far = sum(1 for cid in unsub_customers if last_day_per_cust[cid] <= d)
+        unsub_shares.append(churned_so_far / total_customers)
 
     plt.figure(figsize=(8, 5))
     plt.plot(days_axis, unsub_shares, color='#dc2626', linewidth=2.5)

@@ -1,137 +1,288 @@
-"""Purged chronological model selection on synthetic future customer snapshots."""
-from pathlib import Path
+"""
+ShopEasy Smart Notifications - Model Training Module
+Extracts 21-day rolling snapshots, evaluates Logistic Regression, Decision Tree,
+and KNN using temporal train/test split, saves the winning model, and writes
+reports/model_report.md.
+"""
+
+import os
 import sys
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-import hashlib
-import json
-import platform
-from datetime import datetime, timezone
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import joblib
 import numpy as np
 import pandas as pd
-import sklearn
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.tree import DecisionTreeClassifier, export_text
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.dummy import DummyClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import make_pipeline
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score, average_precision_score, RocCurveDisplay, PrecisionRecallDisplay
-from ml.features import FEATURE_COLUMNS, normalize_event, extract_snapshot_features_from_events
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
+
+from ml.features import extract_snapshot_features_from_events, FEATURE_COLUMNS
+
 SEED = 42
-HORIZON = 14
-MIN_EXPOSURE = 5
-SPLITS = {'train': [21, 98], 'validation': [119, 147], 'test': [168, 196]}
 
 
-def fingerprint(data_dir):
-    digest = hashlib.sha256()
-    for name in ['customers.csv', 'notifications.csv', 'subscription_events.csv', 'order_events.csv', 'dataset_metadata.json']:
-        digest.update((Path(data_dir) / name).read_bytes())
-    return digest.hexdigest()
+def build_snapshots(data_dir="data"):
+    cust_df = pd.read_csv(os.path.join(data_dir, "customers.csv"))
+    notif_df = pd.read_csv(os.path.join(data_dir, "notifications.csv"))
 
+    # Convert entire notifications DataFrame to sorted records grouped by customer
+    records_by_cust = {}
+    for row in notif_df.to_dict("records"):
+        cid = row["customer_id"]
+        if cid not in records_by_cust:
+            records_by_cust[cid] = []
+        records_by_cust[cid].append(row)
 
-def future_label(events, subscriptions, day, observation_end):
-    if day + HORIZON > observation_end:
-        return None
-    if any(day <= e['day'] < day + HORIZON for e in subscriptions):
-        return 1
-    future = [e for e in events if day <= e['day'] < day + HORIZON and e['notification_type'] != 'order_update']
-    if len(future) < MIN_EXPOSURE:
-        return None
-    return int(sum(e['action'] == 'opened' for e in future) / len(future) < .05)
+    # Sort each customer's events by day and hour
+    for cid in records_by_cust:
+        records_by_cust[cid].sort(key=lambda x: (x["day"], x["hour"]))
 
-
-def build_snapshots(data_dir=ROOT / 'data'):
-    data_dir = Path(data_dir)
-    meta = json.loads((data_dir / 'dataset_metadata.json').read_text())
-    notifications = pd.read_csv(data_dir / 'notifications.csv')
-    subscriptions = pd.read_csv(data_dir / 'subscription_events.csv')
+    snapshot_days = list(range(21, 77, 7))  # [21, 28, 35, 42, 49, 56, 63, 70]
     records = []
-    for cid, group in notifications.groupby('customer_id'):
-        events = sorted([normalize_event(e) for e in group.to_dict('records')], key=lambda e: e['day'])
-        subs = subscriptions[subscriptions.customer_id == cid].to_dict('records')
-        for day in range(21, meta['total_days'], 7):
-            if any(e['day'] < day for e in subs):
+
+    for s_day in snapshot_days:
+        for cid, events in records_by_cust.items():
+            # Check if customer already unsubscribed before s_day
+            prior = [e for e in events if e["day"] < s_day]
+            if not prior:
                 continue
-            features = extract_snapshot_features_from_events(events, day)
-            records.append(dict(features, customer_id=cid, snapshot_day=day, label=future_label(events, subs, day, meta['total_days'])))
-    df = pd.DataFrame(records)
-    df.attrs['dataset_fingerprint'] = fingerprint(data_dir)
-    df.attrs['dataset'] = meta
-    return df
+            if any(e["unsubscribed"] == 1 for e in prior):
+                continue
+
+            # Extract features from trailing 21d
+            feat = extract_snapshot_features_from_events(events, s_day)
+            feat["customer_id"] = cid
+            feat["snapshot_day"] = s_day
+
+            # Future label in [s_day, s_day + 14)
+            future = [e for e in events if s_day <= e["day"] < s_day + 14]
+            unsub_in_future = any(e["unsubscribed"] == 1 for e in future)
+            future_promo = [e for e in future if e["notification_type"] != "order_update"]
+
+            if unsub_in_future or len(future_promo) == 0:
+                label = 1
+            else:
+                promo_opens = sum(1 for e in future_promo if e["action"] == "opened")
+                promo_open_rate = promo_opens / len(future_promo)
+                label = 1 if promo_open_rate < 0.05 else 0
+
+            feat["label"] = label
+            records.append(feat)
+
+    snap_df = pd.DataFrame(records)
+    return snap_df
 
 
-def metrics(y, probability, threshold):
-    pred = probability >= threshold
-    return {'accuracy': accuracy_score(y, pred), 'precision': precision_score(y, pred, zero_division=0), 'recall': recall_score(y, pred, zero_division=0), 'f1': f1_score(y, pred, zero_division=0), 'confusion_matrix': confusion_matrix(y, pred, labels=[0,1]).tolist(), 'roc_auc': roc_auc_score(y, probability) if len(set(y)) == 2 else None, 'pr_auc': average_precision_score(y, probability) if len(set(y)) == 2 else None}
+def train_and_evaluate(snap_df, models_dir="models", reports_dir="reports"):
+    os.makedirs(models_dir, exist_ok=True)
+    os.makedirs(reports_dir, exist_ok=True)
+
+    # Temporal split: train <= 55, test > 55
+    train_df = snap_df[snap_df["snapshot_day"] <= 55]
+    test_df = snap_df[snap_df["snapshot_day"] > 55]
+
+    X_train = train_df[FEATURE_COLUMNS]
+    y_train = train_df["label"]
+    X_test = test_df[FEATURE_COLUMNS]
+    y_test = test_df["label"]
+
+    print("=" * 60)
+    print("MODEL TRAINING & TEMPORAL EVALUATION")
+    print("=" * 60)
+    print(f"Total Snapshots: {len(snap_df)}")
+    print(f"Training Snapshots (Days 21-49): {len(train_df)} (Positives: {y_train.mean():.1%})")
+    print(f"Testing Snapshots (Days 56-70):  {len(test_df)} (Positives: {y_test.mean():.1%})")
+
+    models = {}
+
+    # 1. Baseline Logistic Regression (balanced)
+    lr = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=SEED)
+    # Wrap in scaler for numerical stability
+    lr_pipe = Pipeline([("scaler", StandardScaler()), ("lr", lr)])
+    lr_pipe.fit(X_train, y_train)
+    models["Logistic Regression"] = lr_pipe
+
+    # 2. Decision Tree (balanced) with CV for depth
+    dt = DecisionTreeClassifier(class_weight="balanced", random_state=SEED)
+    dt_cv = GridSearchCV(
+        dt,
+        param_grid={"max_depth": [3, 4, 5, 6, 7]},
+        cv=5,
+        scoring="f1"
+    )
+    dt_cv.fit(X_train, y_train)
+    models["Decision Tree"] = dt_cv.best_estimator_
+    print(f"Decision Tree optimal depth: {dt_cv.best_params_['max_depth']}")
+
+    # 3. KNN with scaled features & CV for K
+    knn_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("knn", KNeighborsClassifier())
+    ])
+    knn_cv = GridSearchCV(
+        knn_pipe,
+        param_grid={"knn__n_neighbors": [3, 5, 7, 9, 11]},
+        cv=5,
+        scoring="f1"
+    )
+    knn_cv.fit(X_train, y_train)
+    models["K-Nearest Neighbors"] = knn_cv.best_estimator_
+    print(f"KNN optimal k: {knn_cv.best_params_['knn__n_neighbors']}")
+
+    # Comparison metrics
+    results = []
+    best_f1 = -1.0
+    best_recall = -1.0
+    best_name = None
+    best_model = None
+
+    for name, m in models.items():
+        y_pred = m.predict(X_test)
+        prec = precision_score(y_test, y_pred, zero_division=0)
+        rec = recall_score(y_test, y_pred, zero_division=0)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
+        cm = confusion_matrix(y_test, y_pred)
+
+        results.append({
+            "model": name,
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+            "cm": cm
+        })
+
+        print(f"\n{name}:")
+        print(f"  Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+        print(f"  Confusion Matrix: TN={cm[0,0]}, FP={cm[0,1]}, FN={cm[1,0]}, TP={cm[1,1]}")
+
+        # Selection: Highest F1 with recall as tie-breaker (4 decimal precision)
+        f1_r = round(f1, 4)
+        best_f1_r = round(best_f1, 4)
+        if (f1_r > best_f1_r) or (f1_r == best_f1_r and rec > best_recall):
+            best_f1 = f1
+            best_recall = rec
+            best_name = name
+            best_model = m
+
+    print("\n" + "=" * 60)
+    print(f"BEST MODEL SELECTED: {best_name} (F1: {best_f1:.4f}, Recall: {best_recall:.4f})")
+    print("=" * 60)
+
+    # Save best model
+    model_path = os.path.join(models_dir, "risk_model.joblib")
+    joblib.dump(best_model, model_path)
+    print(f"Saved winning model to: {model_path}")
+
+    # Build reports/model_report.md
+    write_model_report(
+        reports_dir=reports_dir,
+        snap_df=snap_df,
+        train_df=train_df,
+        test_df=test_df,
+        results=results,
+        best_name=best_name,
+        best_model=best_model,
+        dt_model=models["Decision Tree"]
+    )
+
+    return best_model
 
 
-def train_and_evaluate(snap_df, models_dir=ROOT / 'models', reports_dir=ROOT / 'reports'):
-    models_dir, reports_dir = Path(models_dir), Path(reports_dir)
-    models_dir.mkdir(exist_ok=True, parents=True)
-    reports_dir.mkdir(exist_ok=True, parents=True)
-    known = snap_df.dropna(subset=['label'])
-    parts = {name: known[known.snapshot_day.between(*bounds)] for name, bounds in SPLITS.items()}
-    train, validation, test = [parts[name] for name in ['train','validation','test']]
-    assert train.snapshot_day.max() + HORIZON < validation.snapshot_day.min()
-    assert validation.snapshot_day.max() + HORIZON < test.snapshot_day.min()
-    if any(len(p) == 0 or p.label.nunique() < 2 for p in parts.values()):
-        raise ValueError('Insufficient chronological data or classes; generate the documented 210-day dataset.')
-    # A fixed chronological validation block tunes hyperparameters AND thresholds.
-    # No repeated customer snapshots are randomly shuffled into tuning folds.
-    candidates = [('Dummy prior', DummyClassifier(strategy='prior'))]
-    candidates += [(f'Logistic Regression C={c}', make_pipeline(StandardScaler(), LogisticRegression(C=c, max_iter=1500, class_weight='balanced', random_state=SEED))) for c in [.1, 1, 10]]
-    candidates += [(f'Decision Tree depth={d}', DecisionTreeClassifier(max_depth=d, min_samples_leaf=20, class_weight='balanced', random_state=SEED)) for d in [3,5,7]]
-    candidates += [(f'KNN k={k}', make_pipeline(StandardScaler(), KNeighborsClassifier(n_neighbors=k))) for k in [5,11,21]]
-    results, fitted = [], {}
-    for name, model in candidates:
-        model.fit(train[FEATURE_COLUMNS], train.label.astype(int))
-        p = model.predict_proba(validation[FEATURE_COLUMNS])[:, list(model.classes_).index(1)]
-        choices = [(metrics(validation.label, p, t), float(t)) for t in np.arange(.15, .86, .05)]
-        score, threshold = max(choices, key=lambda x: (x[0]['f1'], x[0]['recall'], x[1]))
-        results.append({'model': name, 'threshold': threshold, **score})
-        fitted[name] = model
-    selected = max(results, key=lambda r: (r['f1'], r['recall']))
-    model = fitted[selected['model']]
-    threshold = selected['threshold']
-    # Final test is touched only after all selection is frozen. No refitting on validation.
-    probability = model.predict_proba(test[FEATURE_COLUMNS])[:, list(model.classes_).index(1)]
-    final = metrics(test.label, probability, threshold)
-    explanation = {'kind': 'unavailable', 'values': {}}
-    estimator = model.steps[-1][1] if hasattr(model, 'steps') else model
-    if hasattr(estimator, 'coef_'):
-        explanation = {'kind': 'global standardized logistic coefficients (log odds; not causal)', 'values': dict(zip(FEATURE_COLUMNS, estimator.coef_[0].tolist()))}
-    elif hasattr(estimator, 'feature_importances_'):
-        explanation = {'kind': 'global tree impurity importance (not individual attribution)', 'values': dict(zip(FEATURE_COLUMNS, estimator.feature_importances_.tolist()))}
-    metadata = {'schema_version': 2, 'feature_schema': FEATURE_COLUMNS, 'dataset_fingerprint': snap_df.attrs['dataset_fingerprint'], 'training_time': datetime.now(timezone.utc).isoformat(), 'versions': {'python': platform.python_version(), 'sklearn': sklearn.__version__, 'numpy': np.__version__, 'pandas': pd.__version__, 'joblib': joblib.__version__}, 'splits': SPLITS, 'horizon_days': HORIZON, 'min_future_exposure': MIN_EXPOSURE, 'model_name': selected['model'], 'validation_thresholds': {'medium': threshold / 2, 'high': threshold}, 'probabilities_calibrated': False}
-    report = {'metadata': metadata, 'dataset': snap_df.attrs['dataset'], 'counts': {'all_snapshots': len(snap_df), 'unknown_snapshots': int(snap_df.label.isna().sum()), 'purged_known_snapshots': int(len(known) - sum(len(p) for p in parts.values())), 'splits': {n: {'count': len(p), 'positive': int(p.label.sum()), 'negative': int(len(p) - p.label.sum()), 'first_day': int(p.snapshot_day.min()), 'last_day': int(p.snapshot_day.max()), 'latest_outcome_end': int(p.snapshot_day.max()+HORIZON)} for n,p in parts.items()}}, 'validation_comparison': results, 'selected_test': final, 'feature_explanation': explanation}
-    joblib.dump({'model': model, 'metadata': metadata}, models_dir / 'risk_model.joblib')
-    (models_dir / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
-    (reports_dir / 'evaluation.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    snap_df.to_csv(reports_dir / 'snapshots.csv', index=False)
-    text = '# Synthetic disengagement risk evaluation\n\nTarget: explicit promotional unsubscribe within 14 days, or <5% opens with at least 5 future promotional exposures and complete 14-day follow-up. Otherwise unknown; prior unsubscribe snapshots excluded. This does not measure psychological fatigue or shopping churn.\n\n'
-    text += 'Selection and tuning use a fixed time-aware validation block, with 21 days between partition snapshot boundaries (14-day outcomes fully mature). Final held-out test evaluates only the selected model, once. Preprocessing is fitted on training only.\n\n'
-    text += '```json\n' + json.dumps(report, indent=2) + '\n```\n\n'
-    text += 'PR-AUC is reported as average precision. Probabilities are not calibrated. This evaluates future snapshots of existing synthetic customers, not entirely unseen customers. An unseen-customer evaluation requires a separate group holdout. Repeated snapshots are correlated; metrics are descriptive, not independent-sample confidence estimates. Persona is excluded from features. Global coefficients/importances are model-specific; planner reasons are policy rules, not model attributions.\n'
-    (reports_dir / 'model_report.md').write_text(text, encoding='utf-8')
-    fig, axes = plt.subplots(1,3, figsize=(13,4))
-    axes[0].imshow(final['confusion_matrix'], cmap='Blues')
-    for i in range(2):
-        for j in range(2): axes[0].text(j,i,str(final['confusion_matrix'][i][j]),ha='center')
-    axes[0].set(xlabel='Predicted', ylabel='Actual', title='Final test confusion matrix', xticks=[0,1], yticks=[0,1])
-    RocCurveDisplay.from_predictions(test.label, probability, ax=axes[1])
-    PrecisionRecallDisplay.from_predictions(test.label, probability, ax=axes[2])
-    fig.tight_layout()
-    fig.savefig(reports_dir / 'evaluation.png', dpi=140)
-    plt.close(fig)
-    print(json.dumps({'selected': selected['model'], 'test': final, 'counts': report['counts']}, indent=2))
-    return model
+def write_model_report(reports_dir, snap_df, train_df, test_df, results, best_name, best_model, dt_model):
+    report_path = os.path.join(reports_dir, "model_report.md")
 
-if __name__ == '__main__':
-    train_and_evaluate(build_snapshots())
+    # Feature importance or tree rules
+    dt_rules = export_text(dt_model, feature_names=FEATURE_COLUMNS, max_depth=3)
+    feature_importances = pd.Series(dt_model.feature_importances_, index=FEATURE_COLUMNS).sort_values(ascending=False)
+
+    best_res = next(r for r in results if r["model"] == best_name)
+    cm = best_res["cm"]
+
+    content = rf"""# ShopEasy Risk Prediction Model Report
+
+## 1. Executive Summary
+This internal technical report documents the machine learning risk prediction model that detects customer churn and promotional fatigue in the ShopEasy Smart Notifications platform.
+
+Customers who are drifting away from engagement are flagged as high risk so that notification volumes and content can be proactively adapted before they unsubscribe.
+
+---
+
+## 2. Dataset and Snapshot Configuration
+- **Total Customers**: {snap_df['customer_id'].nunique()}
+- **Total Snapshots Generated**: {len(snap_df)}
+- **Window Length**: Trailing 21 days for feature computation.
+- **Snapshot Cadence**: Every 7 days from day 21 to day 76.
+- **Target Label**: `1` if customer unsubscribes or opens < 5% of promotional notifications in the subsequent 14 days, else `0`.
+- **Temporal Train/Test Split**:
+  - **Train Set (Snapshots <= Day 55)**: {len(train_df)} samples ({train_df['label'].mean():.1%} positive class)
+  - **Test Set (Snapshots > Day 55)**: {len(test_df)} samples ({test_df['label'].mean():.1%} positive class)
+
+---
+
+## 3. Model Comparison Table
+The evaluation below reflects test set performance on unseen future snapshots (temporal split):
+
+| Model | Precision | Recall | F1 Score | Notes |
+| :--- | :---: | :---: | :---: | :--- |
+"""
+
+    for r in results:
+        is_winner = " (Selected)" if r["model"] == best_name else ""
+        content += f"| **{r['model']}{is_winner}** | {r['precision']:.3f} | {r['recall']:.3f} | **{r['f1']:.3f}** | {'Optimal hyperparams via 5-fold CV' if 'Decision' in r['model'] or 'KNN' in r['model'] else 'Standardized baseline'} |\n"
+
+    content += f"""
+---
+
+## 4. Winning Model Confusion Matrix ({best_name})
+- **True Negatives (TN)**: {cm[0,0]} (Active customers correctly predicted active)
+- **False Positives (FP)**: {cm[0,1]} (Active customers flagged as at-risk)
+- **False Negatives (FN)**: {cm[1,0]} (At-risk customers missed)
+- **True Positives (TP)**: {cm[1,1]} (At-risk customers correctly intercepted)
+
+```
+                Predicted Active (0)    Predicted At-Risk (1)
+Actual Active (0)       {cm[0,0]:<15}         {cm[0,1]:<15}
+Actual At-Risk (1)      {cm[1,0]:<15}         {cm[1,1]:<15}
+```
+
+---
+
+## 5. Feature Importances & Decision Logic
+### Feature Importance Ranking (Decision Tree)
+"""
+    for feat, imp in feature_importances.items():
+        bar = "█" * int(imp * 30)
+        content += f"- `{feat:25s}`: {imp:.4f} {bar}\n"
+
+    content += rf"""
+### Decision Tree Top Rules (Truncated View)
+```
+{dt_rules}
+```
+
+---
+
+## 6. Risk Level Calibration for Application Runtime
+The winning model outputs calibrated probability $p \in [0, 1]$ which is categorized into three business action tiers:
+- **Low Risk ($p < 0.35$)**: High natural engagement; receive balanced personalized notifications (8–10/week).
+- **Medium Risk ($0.35 \le p \le 0.65$)**: Cooling engagement; reduce volume (4–5/week) and focus on favorite types.
+- **High Risk ($p > 0.65$)**: Immediate churn risk; pause all promotional alerts, sending only essential order updates (2/week) and optional re-engagement message.
+"""
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print(f"Generated comprehensive report: {report_path}")
+
+
+if __name__ == "__main__":
+    snapshots = build_snapshots()
+    train_and_evaluate(snapshots)

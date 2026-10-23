@@ -1,149 +1,1788 @@
-'use strict';
-const $ = s => document.querySelector(s);
-const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const e = escapeHTML;
-let state, evaluation, page = 'simulator', busy = false;
-let simulation = sessionStorage.getItem('shopeasy-simulation');
-if (!simulation) { simulation = crypto.randomUUID(); sessionStorage.setItem('shopeasy-simulation', simulation); }
-const titles = {overview:'Simulate customer behavior',simulator:'Simulate customer behavior',insights:'Customer insights',planner:'Personalized plan',evaluation:'Model Evaluation'};
-const subtitles = {overview:'Understand the behavior. Explain the decision.',simulator:'Choose a customer. Respond on the phone. See the plan change.',insights:'Observed evidence, model estimates, and policy decisions — clearly separated.',planner:'One candidate stream. Every decision has a reason.',evaluation:'Real results from a purged chronological evaluation on synthetic data.'};
-const badge = (text, cls='') => `<span class="badge ${e(cls)}">${e(text)}</span>`;
-const pct = x => x == null ? 'Unavailable' : `${(x*100).toFixed(1)}%`;
-const names = {offer:'Offers & Sales',new_arrival:'New Arrivals',price_drop:'Price Drops',order_update:'Order Updates'};
-const fmt = t => t ? new Intl.DateTimeFormat('en-GB',{timeZone:state.selected_customer.preferences.timezone,dateStyle:'medium',timeStyle:'short'}).format(new Date(t)) : 'Not scheduled';
-async function api(path, method='GET', body) {
-  const response = await fetch(`/api/${path}`,{method,headers:{'Content-Type':'application/json','X-Simulation-ID':simulation},body:body===undefined?undefined:JSON.stringify(body)});
-  let result;
-  try { result = await response.json(); } catch { throw new Error('Backend returned an unreadable response. Check the server terminal.'); }
-  if (!response.ok) throw new Error(typeof result.detail==='string'?result.detail:Array.isArray(result.detail)?result.detail.map(x=>`${(x.loc||[]).filter(k=>k!=='body').join(' → ')}: ${x.msg}`).join('; '):JSON.stringify(result.detail||result));
-  return result;
-}
-function notice(message='', error=false) { $('#notice').textContent=message; $('#notice').className=error?'error':''; }
-async function reload() { state=await api('state'); render(); }
-async function perform(fn) {
- if(busy)return;
- busy=true;notice('Saving simulation…');
- const controls=[...document.querySelectorAll('button,input,select')].map(node=>[node,node.disabled]);
- controls.forEach(([node])=>node.disabled=true);
- try{await fn();await reload();notice('Saved. The selected customer’s analysis and plan are up to date.');}
- catch(error){notice(error.message,true);if($('#continue-dialog').open&&$('#phone-feedback'))$('#phone-feedback').textContent=error.message;const retry=document.createElement('button');retry.textContent='Retry';retry.onclick=()=>perform(fn);$('#notice').appendChild(retry);}
- finally{busy=false;controls.forEach(([node,disabled])=>{if(node.isConnected)node.disabled=disabled;});updatePhoneReview();}
-}
-function profile() {
-  const c=state.selected_customer;
-  return `<div class="card profile-head"><div><span class="avatar">${e(c.initials)}</span><h2>${e(c.name)} ${badge(c.analysis.status_label,c.analysis.status)}</h2><p class="muted">${e(c.role_hint)} · Week ${c.current_week}</p></div><label>Selected customer<select class="profile-select" id="customer-select" aria-label="Selected customer">${state.customers.map(x=>`<option value="${e(x.id)}" ${x.id===c.id?'selected':''}>${e(x.name)}</option>`).join('')}</select></label></div>`;
-}
-function bars(items) { return items.map(([label,value])=>`<div class="bar-row"><span class="bar-label">${e(label)}</span><div class="track"><div class="fill" style="width:${Math.max(0,Math.min(100,value*100))}%"></div></div><strong>${value.toFixed(2)}</strong></div>`).join(''); }
-let showHints=localStorage.getItem('shopeasy-hints')!=='false';
-function overview(){return simulator();}
-function customerCards(customers) {
- return customers.length?customers.map(c=>`<button class="customer ${c.id===state.selected_customer.id?'selected':''}" data-customer="${e(c.id)}" aria-current="${c.id===state.selected_customer.id?'true':'false'}"><span class="avatar">${e(c.initials)}</span><span><strong>${e(c.name)}${c.id==='guest'?' · Free play':''}</strong><small>${e(c.status_label)} · ${c.current_week-1} weeks completed</small>${showHints?`<small class="role-hint">${e(c.role_hint)}</small>`:''}</span></button>`).join(''):'<p class="empty">No customers match. Try another name.</p>';
-}
-function customerPanel(){return `<details class="customer-panel" ${matchMedia("(min-width: 901px)").matches?"open":""}><summary>Customers · ${e(state.selected_customer.name)} <span class="badge">${state.customers.length}</span></summary><label for="search">Find a customer</label><input id="search" type="search" placeholder="Search by name"><label class="check hint-toggle"><input id="role-hints" type="checkbox" ${showHints?'checked':''}>Show role hints</label><button id="choose-guest" class="guest-button">Try Guest free play →</button><div id="customer-grid" class="customer-list">${customerCards(state.customers)}</div><div class="sample-tools"><button id="sample">Load sample behavior</button><p>All scripted customers: fill missing baseline weeks up to week 5. Existing progress and preferences stay saved.</p><button id="analyze">Analyze behavior</button><p>Refresh analysis for all customers. Model estimates need 3 completed weeks and 6 recent delivered events.</p></div></details>`;}
-function preferences() {
- const p=state.selected_customer.preferences;
- return `<div class="card spaced"><h2>Customer preference center</h2><p class="muted">Explicit choices take priority over personalization. Unchecking a category below mutes it; automatic pauses are separate.</p><form id="preferences"><div class="checks">${['offer','new_arrival','price_drop'].map(t=>`<label class="check"><input type="checkbox" name="category" value="${t}" ${p.muted_categories.includes(t)?'':'checked'}>${names[t]}</label>`).join('')}</div><div class="field-grid">${[['daily_cap','Promotional daily cap',0,20],['weekly_cap','Promotional weekly cap',0,100],['quiet_start','Quiet hours start (0–23)',0,23],['quiet_end','Quiet hours end (0–23)',0,23],['probe_interval_weeks','Probe interval (weeks)',2,52]].map(([key,label,min,max])=>`<label>${label}<input type="number" name="${key}" min="${min}" max="${max}" required value="${p[key]}"></label>`).join('')}<label>Timezone (IANA)<input name="timezone" value="${e(p.timezone)}" required placeholder="Asia/Kolkata"></label></div><div class="checks">${[['promotional_opt_out','Opt out of all promotions'],['disable_all','Disable all notifications'],['recovery_probes','Enable limited recovery probes']].map(([key,label])=>`<label class="check"><input name="${key}" type="checkbox" ${p[key]?'checked':''}>${label}</label>`).join('')}</div><p><small>Promotional opt-out preserves order lifecycle updates. Disable-all stops both. Quiet hours may cross midnight; equal start/end disables quiet hours. Order updates bypass promotional caps and quiet hours. Recovery probes: at most one per eligible week, automatic pauses only, never explicit mutes or high-risk suppression.</small></p><button class="primary" type="submit">Save preferences & replan</button></form></div>`;
-}
-function notification(n,index) {
- return `<article class="notification"><div class="notif-top"><strong>${e(names[n.type])}${n.is_recheck?' · Recovery probe':''}</strong><span>${e(fmt(n.timestamp))}</span></div><p>${e(n.text)}</p><div class="actions"><label>Interaction<select class="action" data-index="${index}"><option value="ignored">Ignore</option><option value="opened">Open</option><option value="dismissed">Dismiss</option>${n.type==='order_update'?'':'<option value="muted">Mute category</option>'}<option value="unsubscribed">Opt out of promotions</option></select></label><label>Simulated viewing<select class="duration" data-index="${index}" disabled><option value="quick_glance">Quick glance · 2s</option><option value="few_seconds" selected>Few seconds · 7s</option><option value="read_fully">Read fully · 25s</option></select></label><label>Response timing<select class="timing" data-index="${index}" disabled><option value="right_away">Right away</option><option value="later_today">Later today</option><option value="next_day">Next day</option></select></label><label class="check"><input class="clicked" data-index="${index}" type="checkbox" disabled>Click</label><label class="check"><input class="saved" data-index="${index}" type="checkbox" disabled>Save</label></div></article>`;
-}
-function phoneInbox(){const c=state.selected_customer,ns=c.active_week_notifications;return `<form id="interactions" class="phone interactive-phone" aria-label="Simulated mobile screen"><div class="notch"></div><div class="phone-status"><span>9:41</span><span>● ▰</span></div><div class="phone-time">ShopEasy</div><p class="phone-caption">${e(c.name)} · Week ${c.current_week} · Simulated phone</p><div id="phone-review" aria-live="polite">0 of ${ns.length} reviewed</div><div id="phone-feedback" role="status" aria-live="polite">Tap a notification action to choose a response.</div><div class="phone-feed">${ns.length?ns.map((n,i)=>`<div class="phone-alert" data-alert="${i}">${notification(n,i)}<div class="phone-buttons">${[['opened','Open'],['ignored','Ignore'],['dismissed','Dismiss'],...(n.type==='order_update'?[]:[['muted','Mute category']]),['unsubscribed','Opt out of promotions']].map(([value,label])=>`<button type="button" data-phone-action="${value}" data-index="${i}" aria-pressed="false">${label}</button>`).join('')}</div><p class="phone-response" id="response-${i}">Choose a response</p></div>`).join(''):'<div class="empty">No notifications delivered this week. Advance the week or update your preferences.</div>'}</div><div class="phone-bottom"><button type="button" id="ignore-remaining">Mark remaining as Ignore</button><p id="submit-help" class="muted">Review each notification, or mark the remaining ones as Ignore.</p><button id="submit-week" class="primary" type="submit" disabled>Submit week & see next plan →</button><button type="button" id="scripted">Play one scripted week</button></div><div class="home-indicator"></div></form>`;}
-function simulator() {
- const c=state.selected_customer;
- return `<div class="simulate-layout">${customerPanel()}<div class="simulation-workspace">${profile()}<div class="week-progress"><strong>${c.history.length<5?'Week '+c.current_week+' of 5 initial weeks':'Week '+c.current_week+' · Continued simulation'}</strong><progress max="5" value="${Math.min(5,c.history.length)}" aria-label="Completed initial weeks"></progress><span>${c.history.length} completed · ${c.preferences.promotional_opt_out?'Promotions opted out; order updates can continue':c.analysis.prediction_status}</span></div><div class="sim-layout phone-workspace"><div class="phone-stage">${phoneInbox()}</div><div class="card phone-help"><p class="eyebrow">YOUR NEXT STEP</p><h2>Respond on the phone</h2><p>Choose <strong>Open, Ignore, Dismiss or Mute</strong> on each notification. Open reveals reading time, response timing, Click and Save.</p><p>Your choices stay in this screen until you <strong>Submit week</strong>. Muting or opt-out applies before later notifications in that saved week.</p><p>Want a shortcut? <strong>Play one scripted week</strong> uses this customer’s preset responses for one week. Guest defaults to ignoring.</p><div class="toolbar"><button data-go="insights">Review insights →</button><button data-go="planner">Review plan →</button></div><hr><h3>Current policy</h3><p>${badge(c.analysis.risk_level,c.analysis.risk_level.toLowerCase())} ${c.analysis.frequency} promotional slots per week</p><p class="muted">${c.active_week_notifications.length} notifications scheduled, including order updates. This is a plan, not real delivery.</p></div></div>${preferences()}</div></div>`;
-}
-function updatePhoneReview(){
- if(!$('#phone-review'))return;
- const reviewed=document.querySelectorAll('.phone-alert[data-response]').length,total=state.selected_customer.active_week_notifications.length;
- $('#phone-review').textContent=`${reviewed} of ${total} reviewed`;
- $('#submit-week').disabled=busy||reviewed<total;
- $('#submit-help').textContent=reviewed<total?`${total-reviewed} responses remaining. Choose each action or mark the remaining notifications as Ignore.`:'All responses ready. Submit to save and advance one week.';
-}
-function bindPhone() {
- document.querySelectorAll('[data-phone-action]').forEach(button=>button.onclick=()=>{
-  const i=button.dataset.index, action=button.dataset.phoneAction;
-  const select=$(`.action[data-index="${i}"]`);select.value=action;select.dispatchEvent(new Event('change'));
-  const alert=$(`[data-alert="${i}"]`);alert.classList.toggle('is-open',action==='opened');
-  alert.dataset.response=action;updatePhoneReview();
-  alert.querySelectorAll('[data-phone-action]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));
-  $(`#response-${i}`).textContent=`${button.textContent} selected · submit week to apply`;
-  $('#phone-feedback').textContent=action==='opened'?'Opened in the simulated phone. Choose reading time, Click or Save below.':`${button.textContent} selected. You can change your choice before submitting.`;
- });
- if($('#ignore-remaining'))$('#ignore-remaining').onclick=()=>document.querySelectorAll('.phone-alert:not([data-response]) [data-phone-action=ignored]').forEach(b=>b.click());
- updatePhoneReview();
-}
-function demoPhone(c, step) {
- const recorded=step===1||step===2;
- const week=recorded?c.history.at(-1):null;
- const notifications=week?week.notifications:c.active_week_notifications;
- const labels={opened:'Opened',ignored:'Ignored',dismissed:'Dismissed',muted:'Category muted',unsubscribed:'Opted out of promotions'};
- return `<div class="phone demo-phone" aria-label="Demo mobile screen"><div class="notch"></div><div class="phone-status"><span>9:41</span><span>● ▰</span></div><div class="phone-time">ShopEasy</div><p class="phone-caption">${e(c.name)} · ${week?'Recorded week '+week.week:'Upcoming week '+c.current_week}</p><div class="phone-banner">${c.preferences.promotional_opt_out?'Promotions switched off · Order updates stay on':recorded?'Scripted responses · actual recorded history':'Personalized notification inbox'}</div><div class="phone-feed">${notifications.map((n,i)=>`<article class="notification phone-replay" style="--arrival:${i*0.25}s"><strong>${e(names[n.type])}</strong><p>${e(n.text)}</p>${recorded?`<span class="badge ${n.action==='opened'?'allowed':''}">${e(labels[n.action]||n.action)}</span>${n.clicked?' · Clicked':''}${n.saved?' · Saved':''}${n.action==='opened'?`<p>Simulated reading: ${e(n.view_seconds ?? n.duration_seconds ?? '')} seconds</p>`:''}`:`<small>${e(fmt(n.timestamp))}</small>`}</article>`).join('')||'<p class="empty">No notifications scheduled.</p>'}</div>${!recorded?`<p class="phone-caption">${c.planner.filter(n=>n.status==='suppressed'&&n.type!=='order_update').length} promotions suppressed by preferences or sending rules.</p>`:''}<div class="home-indicator"></div></div>`;
-}
-function insights() {
- const c=state.selected_customer,a=c.analysis;
- const interestRows=Object.entries(a.interests).filter(([,x])=>x.exposures>0).map(([t,x])=>[`${names[t]} · ${x.level} · ${x.exposures} events`,x.score]);
- const engagementRows=a.week_engagements.flatMap((v,i)=>c.history[i]?.notifications.length?[[`Week ${c.history[i].week}`,v]]:[]);
- return `<p class="aggregate-note">Across this simulation: ${state.customers.length} customers · ${state.customers.filter(x=>x.current_week>1).length} with recorded weeks. Details below describe ${e(c.name)} only.</p>`+profile()+planSummary(c)+`<section class="card"><h2>ML estimate · separate from the sending policy</h2><p><strong>${pct(a.model_probability)}</strong> uncalibrated model output · ${e(a.model_risk_tier)} · ${e(a.prediction_status)}</p><p class="muted">Estimates future promotional disengagement from synthetic training data. This is not model accuracy, proof of fatigue, or shopping churn.</p><details><summary>Model-specific explanation and feature values</summary><p>${e(a.model_explanation.kind)}</p><pre>${e(JSON.stringify({explanation:a.model_explanation,features:a.features},null,2))}</pre></details></section><div class="grid two"><section class="card"><h2>Category interest</h2>${interestRows.length?bars(interestRows):'<p class="empty">No recorded category exposure yet. Submit a simulation week first.</p>'}<p class="muted">Interest score (0–1): opened / delivered in the trailing 21 days. Categories without exposure are unknown.</p></section><section class="card"><h2>Engagement over time</h2><p class="muted">0 = none opened · 1 = all opened. The current API reports opened / delivered per completed week.</p>${engagementRows.length?bars(engagementRows):'<p class="empty">No completed weeks with delivered notifications yet.</p>'}<p class="muted">Only measured simulation weeks shown. Weeks with no deliveries are excluded.</p></section></div><section class="card spaced"><h2>Observed behavior</h2>${a.observations.map(o=>`<p>${e(o)}</p>`).join('')}</section><section class="card"><h2>Sending rules and preference overrides</h2>${a.policy_overrides.map(x=>`<p>${e(x)}</p>`).join('')}<p class="muted">These explain policy decisions; they are not model feature attributions.</p></section>`+categoryDecisions(c)+suggestedAction(c)+timeline(c);
-}
-function timeline(c) {
- return `<div class="card"><h2>Decision-history timeline</h2><div class="timeline">${c.decision_history.length?[...c.decision_history].reverse().map(log=>`<article><strong>Week ${log.week}</strong> · ${badge(log.prediction.risk_level)}<p>Model: ${pct(log.prediction.model_probability)} · ${e(log.prediction.prediction_status)}</p><small>${log.decisions.filter(d=>d.status==='allowed').length} allowed / ${log.decisions.filter(d=>d.status==='deferred').length} deferred / ${log.decisions.filter(d=>d.status==='suppressed').length} suppressed (includes transactions)</small><details><summary>Recorded reasons and preferences</summary><pre>${e(JSON.stringify({preferences:log.preferences,decisions:log.decisions.map(n=>({id:n.id,status:n.status,reason:n.reason}))},null,2))}</pre></details></article>`).join(''):'<p class="empty">Decisions will appear when you interact, analyze, or change preferences.</p>'}</div></div>`;
-}
-function suggestedAction(c){return `<section class="card advice"><p class="eyebrow">SUGGESTED NEXT ACTION · ADVICE</p><h3>${e(c.analysis.recommended_action)}</h3><p>Review the sending reasons and explicit preferences before continuing. No message is sent by this recommendation.</p></section>`;}
-function categoryDecisions(c){return `<div class="card"><h2>Category decisions</h2>${[['Continued',c.analysis.continued_types],['Paused',c.analysis.paused_types]].map(([title,items])=>`<h3>${title}</h3>${items.map(x=>`<div class="category-decision"><strong>${e(names[x.type])}</strong><p class="muted">${e(x.reason)}</p></div>`).join('')||'<p class="muted">None.</p>'}`).join('')}</div>`;}
-function planSummary(c){return `<div class="grid plan-summary"><div class="card"><small>Sending-policy risk</small><div class="stat">${badge(c.analysis.risk_level,c.analysis.risk_level.toLowerCase())}</div><p class="muted">Combines an ML estimate with behavioral rules.</p></div><div class="card"><small>Observed engagement trend</small><div class="stat trend-stat">${e(c.analysis.trend)}</div><p class="muted">From recorded promotional interactions.</p></div><div class="card"><small>Upcoming delivery plan</small><div class="stat">${c.active_week_notifications.length}<span class="metric-unit"> / week</span></div><p class="muted">Includes order updates. Promotional policy limit: ${c.analysis.frequency}.</p></div></div>`;}
-function planner() {
- const c=state.selected_customer,x=c.comparison;
- const delivered=c.planner.filter(n=>n.scheduled_at),held=c.planner.filter(n=>!n.scheduled_at);
- return profile()+planSummary(c)+`<div class="toolbar"><button id="continue-customer" class="primary">Continue as ${e(c.name)} →</button><button data-go="insights">Review evidence</button></div>${c.analysis.model_probability===null?`<div class="banner">${e(c.analysis.prediction_status)}. This plan still respects current rules and preferences. Continue simulating to gather evidence.</div>`:''}<div class="plan-layout"><div><section class="card"><div class="row"><h2>Upcoming week ${c.current_week}</h2>${badge(delivered.length+' scheduled')}</div><p class="muted">Actual simulation dates · ${e(c.preferences.timezone)} · No real notifications sent.</p><ol class="schedule">${delivered.map(n=>`<li><div class="schedule-time">${e(fmt(n.scheduled_at))}</div><div><strong>${e(names[n.type])}</strong> ${badge(n.status,n.status)}<p>${e(n.text)}</p><small>${e(n.reason)}</small></div></li>`).join('')||'<li class="empty">No eligible notifications. Review the preferences or continue to the next week.</li>'}</ol><details><summary>${held.length} suppressed or unscheduled candidates</summary>${held.map(n=>`<article class="notification"><strong>${e(names[n.type])}</strong> ${badge(n.status,n.status)}<p>${e(n.text)}</p><small>${e(n.reason)}</small></article>`).join('')||'<p>All candidates are scheduled.</p>'}</details></section><section class="card"><details open><summary>Compare baseline and personalized plan</summary><p class="muted">Same ${c.planner.length} candidates (${x.candidate_promotions} promotions), same upcoming week. Baseline also respects customer preferences.</p><div class="grid two comparison">${['baseline','adaptive'].map(k=>`<div><h3>${k==='baseline'?'Standard baseline':'Personalized plan'}</h3><p><strong>${c[k==='baseline'?'baseline':'planner'].filter(n=>n.scheduled_at).length}</strong> total scheduled</p><p>${x[k].allowed} promotions allowed · ${x[k].deferred} deferred · ${x[k].suppressed} suppressed</p><small>${[...new Set(c[k==='baseline'?'baseline':'planner'].filter(n=>n.scheduled_at).map(n=>names[n.type]))].map(e).join(' · ')||'No scheduled categories'}</small></div>`).join('')}</div><p class="muted">${e(x.note)}</p><p>Recorded history: ${x.observed.opened_promotions} promotional opens / ${x.observed.delivered_promotions} delivered. A planned reduction does not establish improved retention.</p></details></section></div><div>${categoryDecisions(c)}${suggestedAction(c)}</div></div>`+timeline(c);
-}
-function evaluationPage() {
- if (!evaluation) return '<div class="empty">Loading evaluation…</div>';
- const r=evaluation,m=r.metadata,t=r.selected_test;
- const metricCols=['accuracy','precision','recall','f1','roc_auc','pr_auc'];
- return `<div class="card"><h2>${e(m.model_name)} ${badge('Selected using validation only')}</h2><p>Target: explicit promotional unsubscribe in the next 14 days, or under 5% opens with at least ${m.min_future_exposure} promotional exposures and complete follow-up. Inadequate exposure and incomplete follow-up are unknown. Previously unsubscribed customers are excluded.</p><p class="muted">${r.dataset.customers} synthetic customers · ${r.dataset.total_days} observed days · ${r.dataset.notifications.toLocaleString()} notification events · ${r.dataset.subscription_events} recorded unsubscribe events</p><p>${r.counts.all_snapshots.toLocaleString()} snapshots · ${r.counts.unknown_snapshots} unknown · ${r.counts.purged_known_snapshots} known snapshots excluded by purge gaps</p><div class="table-scroll"><table><thead><tr><th>Partition</th><th>Snapshot days</th><th>Latest outcome end</th><th>Count</th><th>Positive / negative</th></tr></thead><tbody>${Object.entries(r.counts.splits).map(([name,s])=>`<tr><td>${e(name)}</td><td>${s.first_day}–${s.last_day}</td><td>${s.latest_outcome_end}</td><td>${s.count}</td><td>${s.positive} / ${s.negative}</td></tr>`).join('')}</tbody></table></div></div><div class="card"><h2>Selected model · Final held-out test</h2><div class="grid">${metricCols.map(k=>`<div><small>${e(k.toUpperCase().replaceAll('_','-'))}</small><div class="stat" style="font-size:25px">${t[k]===null?'Undefined':t[k].toFixed(4)}</div></div>`).join('')}</div><p class="muted">Only ${r.counts.splits.test.positive} positive test snapshots. Accuracy is dominated by the negative class; recall, F1 and PR-AUC expose the limitations. PR-AUC uses average precision. No target accuracy was assumed.</p><img class="evaluation-chart" src="/reports/evaluation.png" alt="Final selected model confusion matrix, ROC curve, and precision recall curve"><p>Confusion matrix [[TN, FP], [FN, TP]]: <strong>${e(JSON.stringify(t.confusion_matrix))}</strong></p></div><div class="card"><h2>Time-aware validation comparison</h2><p class="muted">Hyperparameters and thresholds are tuned on one future validation block. No random customer-snapshot folds. The final test was not used for selection.</p><div class="table-scroll"><table><thead><tr><th>Candidate</th><th>Threshold</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th><th>ROC-AUC</th><th>PR-AUC</th></tr></thead><tbody>${r.validation_comparison.map(v=>`<tr><td>${e(v.model)}</td><td>${v.threshold.toFixed(2)}</td>${metricCols.map(k=>`<td>${v[k]===null?'Undefined':v[k].toFixed(4)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div><div class="card"><h2>Interpretation and reproducibility</h2><p>Probabilities have not been calibrated. The model estimates promotional disengagement; low interaction does not prove psychological fatigue or actual shopping churn.</p><p>This test evaluates future snapshots of existing synthetic customers. Entirely unseen customers require a separate customer-group holdout. Repeated snapshots are correlated. Synthetic generation and survivor selection limit generalization.</p><p>Policy tiers use validation-selected thresholds: medium ${m.validation_thresholds.medium.toFixed(3)}, high ${m.validation_thresholds.high.toFixed(3)}. The medium boundary is half the selected classification threshold, a policy convention rather than a separately optimized clinical or business cutoff.</p><details><summary>Artifact metadata and global feature explanation</summary><pre>${e(JSON.stringify({metadata:m,feature_explanation:r.feature_explanation},null,2))}</pre></details><a href="/reports/model_report.md" target="_blank" rel="noopener">Open generated evaluation report</a></div>`;
-}
-function render() {
- if(!state) return;
- $('#page-title').textContent=titles[page];$('#subtitle').textContent=subtitles[page];
- document.querySelectorAll('[data-page]').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);b.setAttribute('aria-current',b.dataset.page===page?'page':'false');});
- $('#model-status').textContent=state.model_available?'● Model loaded · Estimates are uncalibrated · All training data and demonstration outcomes are synthetic':`Model unavailable · Rule-only fallback · ${state.model_error}`;
- const c=state.selected_customer;$('#workflow').innerHTML=[['Simulate behavior',c.history.length+' weeks recorded'],['Analyze',c.analysis.model_probability==null?'Estimate unavailable': 'Estimate available'],['Review plan',c.active_week_notifications.length+' scheduled notifications']].map(([label,detail],i)=>`<li class="${i===(page==='planner'?2:page==='insights'?1:0)?'current':''}"><span>${i+1}</span><div><strong>${label}</strong><small>${e(detail)}</small></div></li>`).join('');$('#report').disabled=false;
- $('#content').innerHTML=({overview,simulator,insights,planner,evaluation:evaluationPage}[page])();
- bind();
-}
-async function go(next) {
- page=next;render();
- if(page==='evaluation'&&!evaluation) {try {evaluation=await api('evaluation');render();}catch(error){notice(error.message,true);}}
-}
-function bind() {
- bindPhone();
- if($('#continue-customer'))$('#continue-customer').onclick=()=>{ $('#continue-content').innerHTML=phoneInbox();bind();$('#continue-dialog').showModal();};
- document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go));
- document.querySelectorAll('[data-customer]').forEach(b=>b.onclick=()=>perform(async()=>{await api(`customer/${b.dataset.customer}/select`,'POST');page='simulator';}));
- if($('#customer-select')) $('#customer-select').onchange=ev=>perform(()=>api(`customer/${ev.target.value}/select`,'POST'));
- if($('#sample')) $('#sample').onclick=()=>perform(()=>api('sample-behaviour','POST'));
- const selectCustomer=cid=>perform(async()=>{await api(`customer/${cid}/select`,'POST');page='simulator';});
- if($('#search')){
- const filter=()=>{const query=$('#search').value.toLowerCase();$('#customer-grid').innerHTML=customerCards(state.customers.filter(c=>c.name.toLowerCase().includes(query)));document.querySelectorAll('[data-customer]').forEach(b=>b.onclick=()=>selectCustomer(b.dataset.customer));};
- $('#search').oninput=filter;$('#role-hints').onchange=()=>{showHints=$('#role-hints').checked;localStorage.setItem('shopeasy-hints',showHints);filter();};$('#choose-guest').onclick=()=>selectCustomer('guest');
- }
- if($('#analyze'))$('#analyze').onclick=()=>perform(()=>api('run-system','POST'));
- if($('#scripted')) $('#scripted').onclick=()=>perform(()=>api(`customer/${state.selected_customer.id}/auto-play`,'POST'));
- document.querySelectorAll('.action').forEach(select=>select.onchange=()=>{const i=select.dataset.index,opened=select.value==='opened';['duration','timing','clicked','saved'].forEach(cls=>{const control=$(`.${cls}[data-index="${i}"]`);control.disabled=!opened;if(!opened&&control.type==='checkbox')control.checked=false;});});
- if($('#interactions')) $('#interactions').onsubmit=ev=>{ev.preventDefault();if($('#submit-week').disabled)return;const c=state.selected_customer;const actions=c.active_week_notifications.map((n,i)=>({id:n.id,action:$(`.action[data-index="${i}"]`).value,duration:$(`.duration[data-index="${i}"]`).value,timing:$(`.timing[data-index="${i}"]`).value,clicked:$(`.clicked[data-index="${i}"]`).checked,saved:$(`.saved[data-index="${i}"]`).checked}));const body={submission_id:crypto.randomUUID(),week:c.current_week,actions};perform(async()=>{await api(`customer/${c.id}/submit-week`,'POST',body);if($('#continue-dialog').open)$('#continue-dialog').close();});};
- if($('#preferences')) $('#preferences').onsubmit=ev=>{ev.preventDefault();const f=new FormData(ev.target),p={...state.selected_customer.preferences};p.muted_categories=['offer','new_arrival','price_drop'].filter(t=>!f.getAll('category').includes(t));['daily_cap','weekly_cap','quiet_start','quiet_end','probe_interval_weeks'].forEach(k=>p[k]=Number(f.get(k)));['promotional_opt_out','disable_all','recovery_probes'].forEach(k=>p[k]=f.has(k));p.timezone=f.get('timezone');perform(()=>api(`customer/${state.selected_customer.id}/preferences`,'PUT',p));};
-}
-const customerBreakpoint=matchMedia('(min-width: 901px)');customerBreakpoint.addEventListener('change',()=>{const panel=$('.customer-panel');if(panel)panel.open=customerBreakpoint.matches;});
-document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>go(b.dataset.page));
-$('#theme').onclick=()=>{const theme=document.documentElement.dataset.theme==='light'?'dark':'light';document.documentElement.dataset.theme=theme;localStorage.setItem('shopeasy-theme',theme);$('#theme').textContent=theme==='light'?'Dark mode':'Light mode';};
-document.documentElement.dataset.theme=localStorage.getItem('shopeasy-theme')||'light';$('#theme').textContent=document.documentElement.dataset.theme==='light'?'Dark mode':'Light mode';
-$('#reset').onclick=()=>$('#reset-dialog').showModal();
-$('#reset-cancel').onclick=()=>$('#reset-dialog').close();
-$('#reset-confirm').onclick=()=>{ $('#reset-dialog').close();perform(async()=>{await api('reset','POST');page='simulator';});};
-$('#continue-close').onclick=()=>$('#continue-dialog').close();
-$('#continue-dialog').addEventListener('close',()=>{ $('#continue-content').innerHTML='';$('#continue-customer')?.focus();});
-$('#reset-dialog').addEventListener('close',()=>$('#reset').focus());
+/**
+ * ShopEasy Smart Notifications - Interactive Dashboard Client
+ * Vanilla JavaScript, Zero External Dependencies, Offline-Ready
+ */
 
-async function boot(){notice('Loading your simulation…');try{await api('health');await reload();notice('');}catch(error){notice(`Cannot load ShopEasy. Start python run.py and retry. ${error.message}`,true);const retry=document.createElement('button');retry.textContent='Retry connection';retry.onclick=boot;$('#notice').appendChild(retry);}}boot();
+(function () {
+  "use strict";
 
+  // Application State Cache
+  let appState = {
+    customers: [],
+    selectedCustomer: null,
+    systemRun: false,
+    summaryMetrics: {},
+    standardBundle: [],
+    activeTab: "tab-simulate",
+    roleHintsVisible: false,
+    compareWithBefore: false,
+    autoDemoRunning: false,
+    autoDemoPaused: false,
+    autoDemoTimer: null,
+    autoDemoStep: 0,
+    tab2Subview: "inboxes",
+    demoTime: "afternoon",
+    composeState: {
+      customerId: "aarav",
+      type: "offer",
+      category: "Fashion",
+      item: "Sneakers",
+      highlight: "20% off",
+      urgency: "normal",
+      isSubmitting: false,
+      lastEvaluatedItem: null
+    },
+    activeModal: null
+  };
 
+  // DOM Elements Cache
+  const dom = {
+    tabBtns: document.querySelectorAll(".tab-btn"),
+    tabPanels: document.querySelectorAll(".tab-panel"),
+    themeToggleBtn: document.getElementById("theme-toggle-btn"),
+    resetBtn: document.getElementById("reset-btn"),
+    resetModal: document.getElementById("reset-modal"),
+    resetCancelBtn: document.getElementById("reset-cancel-btn"),
+    resetConfirmBtn: document.getElementById("reset-confirm-btn"),
+    autoDemoBtn: document.getElementById("auto-demo-btn"),
+    demoController: document.getElementById("demo-controller"),
+    demoProgressFill: document.getElementById("demo-progress-fill"),
+    demoStatusText: document.getElementById("demo-status-text"),
+    demoPauseBtn: document.getElementById("demo-pause-btn"),
+    demoStopBtn: document.getElementById("demo-stop-btn"),
+    loadingOverlay: document.getElementById("loading-overlay"),
+    
+    // Tab 1 Elements
+    roleHintsToggle: document.getElementById("role-hints-toggle"),
+    customerCardsContainer: document.getElementById("customer-cards-container"),
+    playCustomerBtn: document.getElementById("play-customer-btn"),
+    loadSampleBtn: document.getElementById("load-sample-btn"),
+    phoneAvatar: document.getElementById("phone-avatar"),
+    phoneCustName: document.getElementById("phone-cust-name"),
+    phoneCustSub: document.getElementById("phone-cust-sub"),
+    phoneWeekBadge: document.getElementById("phone-week-badge"),
+    simNotifsStream: document.getElementById("sim-notifs-stream"),
+    submitWeekBtn: document.getElementById("submit-week-btn"),
+    submitHelpText: document.getElementById("submit-help-text"),
+    runSystemBanner: document.getElementById("run-system-banner"),
+    runSystemBtn: document.getElementById("run-system-btn"),
+    
+    // Tab 2 Elements
+    compareToggle: document.getElementById("compare-toggle"),
+    notifCustList: document.getElementById("notif-cust-list"),
+    outPhoneAvatar: document.getElementById("out-phone-avatar"),
+    outPhoneName: document.getElementById("out-phone-name"),
+    outPhoneCount: document.getElementById("out-phone-count"),
+    outStatusPill: document.getElementById("out-status-pill"),
+    outNotifsStream: document.getElementById("out-notifs-stream"),
+    continueCustomerBtn: document.getElementById("continue-customer-btn"),
+    continuedDrawer: document.getElementById("continued-drawer"),
+    contCustName: document.getElementById("cont-cust-name"),
+    contNotifsStream: document.getElementById("cont-notifs-stream"),
+    contSubmitBtn: document.getElementById("cont-submit-btn"),
+    contCancelBtn: document.getElementById("cont-cancel-btn"),
+
+    // Tab 2 Segmented Control & Compose Elements
+    segInboxesBtn: document.getElementById("seg-inboxes-btn"),
+    segComposeBtn: document.getElementById("seg-compose-btn"),
+    subviewInboxes: document.getElementById("subview-inboxes"),
+    subviewCompose: document.getElementById("subview-compose"),
+    composePrereqBanner: document.getElementById("compose-prereq-banner"),
+    composeActiveLayout: document.getElementById("compose-active-layout"),
+    composeGoSimBtn: document.getElementById("compose-go-sim-btn"),
+    composeCustomerSelect: document.getElementById("compose-customer-select"),
+    composeCustHintText: document.getElementById("compose-cust-hint-text"),
+    composeTypeChips: document.getElementById("compose-type-chips"),
+    composeCategoryChips: document.getElementById("compose-category-chips"),
+    composeItemSelect: document.getElementById("compose-item-select"),
+    composeHighlightSelect: document.getElementById("compose-highlight-select"),
+    composeUrgencyChips: document.getElementById("compose-urgency-chips"),
+    composeEssentialNote: document.getElementById("compose-essential-note"),
+    composeGenerateBtn: document.getElementById("compose-generate-btn"),
+    demoTimeSelector: document.getElementById("demo-time-selector"),
+    compPhoneAvatar: document.getElementById("comp-phone-avatar"),
+    compPhoneName: document.getElementById("comp-phone-name"),
+    compPhoneCount: document.getElementById("comp-phone-count"),
+    compStatusPill: document.getElementById("comp-status-pill"),
+    compNotifsStream: document.getElementById("comp-notifs-stream"),
+    recActCustName: document.getElementById("rec-act-cust-name"),
+    recentActivityList: document.getElementById("recent-activity-list"),
+
+    // Modals & Toasts
+    modalScheduled: document.getElementById("modal-scheduled"),
+    modalSchedCust: document.getElementById("modal-sched-cust"),
+    modalSchedTime: document.getElementById("modal-sched-time"),
+    modalSchedReason: document.getElementById("modal-sched-reason"),
+    modalSchedPreview: document.getElementById("modal-sched-preview"),
+    modalSchedCancelBtn: document.getElementById("modal-sched-cancel-btn"),
+    modalSchedOverrideBtn: document.getElementById("modal-sched-override-btn"),
+    modalSchedOkBtn: document.getElementById("modal-sched-ok-btn"),
+
+    modalNotSent: document.getElementById("modal-not-sent"),
+    modalNotSentCust: document.getElementById("modal-not-sent-cust"),
+    modalNotSentReason: document.getElementById("modal-not-sent-reason"),
+    modalNotSentPreview: document.getElementById("modal-not-sent-preview"),
+    modalNotSentOverrideBtn: document.getElementById("modal-not-sent-override-btn"),
+    modalNotSentOkBtn: document.getElementById("modal-not-sent-ok-btn"),
+
+    modalConfirmOverride: document.getElementById("modal-confirm-override"),
+    modalConfirmCancelBtn: document.getElementById("modal-confirm-cancel-btn"),
+    modalConfirmProceedBtn: document.getElementById("modal-confirm-proceed-btn"),
+
+    toastContainer: document.getElementById("toast-container"),
+    
+    // Tab 3 Elements
+    metricEngaged: document.getElementById("metric-engaged"),
+    metricLosing: document.getElementById("metric-losing"),
+    metricRisk: document.getElementById("metric-risk"),
+    metricUnsub: document.getElementById("metric-unsub"),
+    metricAvoided: document.getElementById("metric-avoided"),
+    insightsCustList: document.getElementById("insights-cust-list"),
+    insAvatar: document.getElementById("ins-avatar"),
+    insName: document.getElementById("ins-name"),
+    insTopInterest: document.getElementById("ins-top-interest"),
+    insStatusBadge: document.getElementById("ins-status-badge"),
+    insInterestsList: document.getElementById("ins-interests-list"),
+    insChartContainer: document.getElementById("ins-chart-container"),
+    insTrendBadge: document.getElementById("ins-trend-badge"),
+    insRiskBadge: document.getElementById("ins-risk-badge"),
+    insLikelyBehavior: document.getElementById("ins-likely-behavior"),
+    insObservationsList: document.getElementById("ins-observations-list"),
+    insFrequencyLine: document.getElementById("ins-frequency-line"),
+    insDecisionsContainer: document.getElementById("ins-decisions-container"),
+    insRecActionTitle: document.getElementById("ins-rec-action-title"),
+    insRecActionDesc: document.getElementById("ins-rec-action-desc")
+  };
+
+  const COMPOSE_CATEGORY_ITEMS = {
+    "Fashion": ["Sneakers", "Denim jacket", "Handbag", "Watch"],
+    "Electronics": ["Wireless headphones", "Smartwatch", "Power bank", "Bluetooth speaker"],
+    "Home & Kitchen": ["Air fryer", "Bedsheet set", "Cookware set", "Table lamp"],
+    "Beauty": ["Face serum", "Perfume", "Sunscreen", "Lipstick set"],
+    "Groceries": ["Fresh fruits box", "Snack combo", "Organic staples", "Coffee beans"],
+    "Sports": ["Running shoes", "Yoga mat", "Cricket bat", "Gym gloves"]
+  };
+
+  const COMPOSE_TYPE_HIGHLIGHTS = {
+    "offer": ["20% off", "40% off", "Buy 1 Get 1", "Free delivery"],
+    "new_arrival": ["Just launched", "Back in stock", "Limited edition", "Trending now"],
+    "price_drop": ["Price just dropped", "Lowest this month", "Only a few left"],
+    "order_update": ["Shipped", "Out for delivery", "Delivered", "Delayed"]
+  };
+
+  // SVGs for categories
+  const CATEGORY_ICONS = {
+    offer: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>`,
+    new_arrival: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,
+    price_drop: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg>`,
+    order_update: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>`
+  };
+
+  const CATEGORY_NAMES = {
+    offer: "Offers & Sales",
+    new_arrival: "New Arrivals",
+    price_drop: "Price Drops",
+    order_update: "Order Updates"
+  };
+
+  // =========================================================================
+  // INITIALIZATION
+  // =========================================================================
+
+  async function init() {
+    setupTheme();
+    setupEventListeners();
+    await fetchState();
+  }
+
+  function setupTheme() {
+    const saved = localStorage.getItem("shopeasy_theme") || "light";
+    document.documentElement.setAttribute("data-theme", saved);
+  }
+
+  function toggleTheme() {
+    const cur = document.documentElement.getAttribute("data-theme") || "light";
+    const next = cur === "light" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("shopeasy_theme", next);
+  }
+
+  // =========================================================================
+  // STATE MANAGEMENT & API CALLS
+  // =========================================================================
+
+  async function fetchState() {
+    try {
+      const res = await fetch("/api/state");
+      const data = await res.json();
+      appState.customers = data.customers;
+      appState.selectedCustomer = data.selected_customer;
+      appState.systemRun = data.system_run;
+      appState.summaryMetrics = data.summary_metrics;
+      appState.standardBundle = data.standard_bundle;
+
+      renderAll();
+    } catch (err) {
+      console.error("Failed to fetch state:", err);
+    }
+  }
+
+  async function selectCustomer(cid) {
+    try {
+      await fetch(`/api/customer/${cid}/select`, { method: "POST" });
+      await fetchState();
+    } catch (err) {
+      console.error("Failed to select customer:", err);
+    }
+  }
+
+  async function submitWeekActions(cid, actions) {
+    try {
+      await fetch(`/api/customer/${cid}/submit-week`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actions })
+      });
+      await fetchState();
+    } catch (err) {
+      console.error("Failed to submit week:", err);
+    }
+  }
+
+  async function autoPlayCustomer(cid) {
+    try {
+      await fetch(`/api/customer/${cid}/auto-play`, { method: "POST" });
+      await fetchState();
+    } catch (err) {
+      console.error("Failed to auto-play customer:", err);
+    }
+  }
+
+  async function loadSampleBehaviour() {
+    try {
+      await fetch("/api/sample-behaviour", { method: "POST" });
+      await fetchState();
+    } catch (err) {
+      console.error("Failed to load sample behaviour:", err);
+    }
+  }
+
+  async function runSystem() {
+    // Show friendly loading overlay for ~2 seconds
+    dom.loadingOverlay.classList.remove("hidden");
+    await new Promise((r) => setTimeout(r, 1800));
+
+    try {
+      await fetch("/api/run-system", { method: "POST" });
+      await fetchState();
+    } catch (err) {
+      console.error("Failed to run system:", err);
+    } finally {
+      dom.loadingOverlay.classList.add("hidden");
+      switchTab("tab-notifications");
+    }
+  }
+
+  async function resetDemo() {
+    try {
+      await fetch("/api/reset", { method: "POST" });
+      dom.resetModal.classList.add("hidden");
+      for (const k in cachedRecentActivity) delete cachedRecentActivity[k];
+      appState.demoTime = "afternoon";
+      appState.composeState.lastEvaluatedItem = null;
+      await fetchState();
+      switchTab("tab-simulate");
+    } catch (err) {
+      console.error("Failed to reset:", err);
+    }
+  }
+
+  // =========================================================================
+  // TAB NAVIGATION & SHORTCUTS
+  // =========================================================================
+
+  function switchTab(tabId) {
+    appState.activeTab = tabId;
+    dom.tabBtns.forEach((btn) => {
+      btn.classList.toggle("active", btn.getAttribute("data-tab") === tabId);
+    });
+    dom.tabPanels.forEach((panel) => {
+      panel.classList.toggle("active", panel.id === tabId);
+    });
+
+    // Close continued drawer when switching tabs
+    dom.continuedDrawer.classList.add("hidden");
+  }
+
+  function handleKeyboardNav(e) {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+    if (e.key === "Escape") {
+      if (appState.activeModal) {
+        closeModal(appState.activeModal);
+      }
+      dom.resetModal.classList.add("hidden");
+      dom.continuedDrawer.classList.add("hidden");
+      return;
+    }
+
+    if (e.key === "ArrowRight") {
+      if (appState.activeTab === "tab-simulate") switchTab("tab-notifications");
+      else if (appState.activeTab === "tab-notifications") switchTab("tab-insights");
+    } else if (e.key === "ArrowLeft") {
+      if (appState.activeTab === "tab-insights") switchTab("tab-notifications");
+      else if (appState.activeTab === "tab-notifications") switchTab("tab-simulate");
+    } else if (e.key === "r" || e.key === "R") {
+      dom.resetModal.classList.remove("hidden");
+    }
+  }
+
+  // =========================================================================
+  // RENDERING
+  // =========================================================================
+
+  function renderAll() {
+    renderTab1();
+    renderTab2();
+    renderTab3();
+  }
+
+  // --- TAB 1: Simulate Customers ---
+  function renderTab1() {
+    const custs = appState.customers;
+    const sel = appState.selectedCustomer;
+    if (!sel) return;
+
+    // 1. Render Customer Cards Grid
+    dom.customerCardsContainer.innerHTML = custs
+      .map((c) => {
+        const isSelected = c.id === sel.id;
+        const isCompleted = c.is_finished;
+        const isUnsub = c.is_unsubscribed;
+
+        let badgeClass = "progress-pill";
+        let badgeText = `Week ${c.current_week} of 5`;
+        if (isUnsub) {
+          badgeClass += " unsubscribed";
+          badgeText = "Unsubscribed";
+        } else if (isCompleted) {
+          badgeClass += " completed";
+          badgeText = "Finished ✓";
+        }
+
+        const roleVisibleClass = appState.roleHintsVisible ? "visible" : "";
+
+        return `
+          <div class="cust-card ${isSelected ? "selected" : ""}" data-cid="${c.id}">
+            <div class="cust-card-top">
+              <div class="avatar">${c.initials}</div>
+              <span class="${badgeClass}">${badgeText}</span>
+            </div>
+            <div class="cust-card-info">
+              <span class="cust-name">${c.name}</span>
+              <span class="cust-role-hint ${roleVisibleClass}">${c.role_hint}</span>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+
+    // Add click listeners to cards
+    dom.customerCardsContainer.querySelectorAll(".cust-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        selectCustomer(card.getAttribute("data-cid"));
+      });
+    });
+
+    // 2. Render Phone Mockup for Selected Customer
+    dom.phoneAvatar.textContent = sel.initials;
+    dom.phoneCustName.textContent = sel.name;
+
+    if (sel.is_unsubscribed) {
+      dom.phoneCustSub.textContent = "Customer unsubscribed from all alerts";
+      dom.phoneWeekBadge.textContent = "Ended";
+      dom.simNotifsStream.innerHTML = `
+        <div class="empty-phone-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+          <div class="empty-phone-title">Customer Unsubscribed</div>
+          <p>No further alerts sent.</p>
+        </div>
+      `;
+      dom.submitWeekBtn.disabled = true;
+      dom.submitHelpText.textContent = "Simulation completed for this customer";
+    } else if (sel.is_finished) {
+      dom.phoneCustSub.textContent = "Completed all 5 simulation weeks";
+      dom.phoneWeekBadge.textContent = "Week 5 ✓";
+      dom.simNotifsStream.innerHTML = `
+        <div class="empty-phone-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+          <div class="empty-phone-title">All 5 Weeks Complete</div>
+          <p>Ready to run the system or inspect other customers.</p>
+        </div>
+      `;
+      dom.submitWeekBtn.disabled = true;
+      dom.submitHelpText.textContent = "All weeks submitted";
+    } else {
+      dom.phoneCustSub.textContent = `Week ${sel.current_week} of 5 • 6 alerts to review`;
+      dom.phoneWeekBadge.textContent = `Week ${sel.current_week}`;
+
+      const notifs = sel.active_week_notifications || [];
+      dom.simNotifsStream.innerHTML = notifs
+        .map((n, idx) => {
+          const act = n.action;
+          const isDone = !!act;
+          const isOpened = act === "opened";
+          const dur = n.duration || "few_seconds";
+          const timing = n.timing || "right_away";
+
+          return `
+            <div class="sim-notif-card ${isDone ? "completed-action" : ""}" data-nid="${n.id}">
+              <div class="sim-notif-top">
+                <span class="category-tag ${n.type}">
+                  ${CATEGORY_ICONS[n.type]}
+                  <span>${CATEGORY_NAMES[n.type]}</span>
+                </span>
+                <span class="notif-time">${n.day_name}, ${n.time}</span>
+              </div>
+              <div class="sim-notif-text">${n.text}</div>
+              
+              <!-- Primary Actions Group -->
+              <div class="action-buttons-group">
+                <button type="button" class="act-btn ${act === "opened" ? "active" : ""}" data-act="opened">Open</button>
+                <button type="button" class="act-btn ${act === "ignored" ? "active" : ""}" data-act="ignored">Ignore</button>
+                <button type="button" class="act-btn ${act === "dismissed" ? "active" : ""}" data-act="dismissed">Dismiss</button>
+                <button type="button" class="act-btn danger ${act === "muted" ? "active" : ""}" data-act="muted">Mute</button>
+                <button type="button" class="act-btn danger ${act === "unsubscribed" ? "active" : ""}" data-act="unsubscribed">Unsubscribe</button>
+              </div>
+
+              <!-- Open Sub-options Accordion -->
+              ${
+                isOpened
+                  ? `
+                <div class="open-details-panel">
+                  <div class="open-row">
+                    <span class="open-label">How long:</span>
+                    <div class="pill-group">
+                      <button type="button" class="pill-opt ${dur === "quick_glance" ? "active" : ""}" data-dur="quick_glance">Quick glance</button>
+                      <button type="button" class="pill-opt ${dur === "few_seconds" ? "active" : ""}" data-dur="few_seconds">A few seconds</button>
+                      <button type="button" class="pill-opt ${dur === "read_fully" ? "active" : ""}" data-dur="read_fully">Read fully</button>
+                    </div>
+                  </div>
+                  <div class="open-row">
+                    <span class="open-label">Responded:</span>
+                    <div class="pill-group">
+                      <button type="button" class="pill-opt ${timing === "right_away" ? "active" : ""}" data-time="right_away">Right away</button>
+                      <button type="button" class="pill-opt ${timing === "later_today" ? "active" : ""}" data-time="later_today">Later today</button>
+                      <button type="button" class="pill-opt ${timing === "next_day" ? "active" : ""}" data-time="next_day">Next day</button>
+                    </div>
+                  </div>
+                  <div class="toggle-opt-row">
+                    <label class="chk-chip">
+                      <input type="checkbox" class="chk-tapped" ${n.clicked ? "checked" : ""}>
+                      <span>Tapped through to product</span>
+                    </label>
+                    <label class="chk-chip">
+                      <input type="checkbox" class="chk-saved" ${n.saved ? "checked" : ""}>
+                      <span>Saved for later</span>
+                    </label>
+                  </div>
+                </div>
+              `
+                  : ""
+              }
+            </div>
+          `;
+        })
+        .join("");
+
+      // Add interactive event listeners inside phone cards
+      attachPhoneStreamListeners(sel);
+      validateSubmitButton(sel);
+    }
+
+    // 3. Check if all active customers are finished -> reveal Run System Banner
+    const allFinished = custs.filter((c) => c.id !== "guest").every((c) => c.is_finished);
+    dom.runSystemBanner.classList.toggle("hidden", !allFinished);
+  }
+
+  function attachPhoneStreamListeners(sel) {
+    const stream = dom.simNotifsStream;
+
+    // Action button clicks
+    stream.querySelectorAll(".act-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const card = e.target.closest(".sim-notif-card");
+        const nid = card.getAttribute("data-nid");
+        const notif = sel.active_week_notifications.find((n) => n.id === nid);
+        if (!notif) return;
+
+        notif.action = e.target.getAttribute("data-act");
+        if (notif.action === "opened" && !notif.duration) {
+          notif.duration = "few_seconds";
+          notif.timing = "right_away";
+        }
+        renderTab1();
+      });
+    });
+
+    // Duration clicks
+    stream.querySelectorAll(".pill-opt[data-dur]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const card = e.target.closest(".sim-notif-card");
+        const nid = card.getAttribute("data-nid");
+        const notif = sel.active_week_notifications.find((n) => n.id === nid);
+        if (!notif) return;
+        notif.duration = e.target.getAttribute("data-dur");
+        renderTab1();
+      });
+    });
+
+    // Timing clicks
+    stream.querySelectorAll(".pill-opt[data-time]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const card = e.target.closest(".sim-notif-card");
+        const nid = card.getAttribute("data-nid");
+        const notif = sel.active_week_notifications.find((n) => n.id === nid);
+        if (!notif) return;
+        notif.timing = e.target.getAttribute("data-time");
+        renderTab1();
+      });
+    });
+
+    // Toggles
+    stream.querySelectorAll(".chk-tapped").forEach((chk) => {
+      chk.addEventListener("change", (e) => {
+        const card = e.target.closest(".sim-notif-card");
+        const nid = card.getAttribute("data-nid");
+        const notif = sel.active_week_notifications.find((n) => n.id === nid);
+        if (notif) notif.clicked = e.target.checked;
+      });
+    });
+
+    stream.querySelectorAll(".chk-saved").forEach((chk) => {
+      chk.addEventListener("change", (e) => {
+        const card = e.target.closest(".sim-notif-card");
+        const nid = card.getAttribute("data-nid");
+        const notif = sel.active_week_notifications.find((n) => n.id === nid);
+        if (notif) notif.saved = e.target.checked;
+      });
+    });
+  }
+
+  function validateSubmitButton(sel) {
+    if (sel.is_finished) {
+      dom.submitWeekBtn.disabled = true;
+      return;
+    }
+    const notifs = sel.active_week_notifications || [];
+    const allActed = notifs.length === 6 && notifs.every((n) => !!n.action);
+    dom.submitWeekBtn.disabled = !allActed;
+    dom.submitHelpText.textContent = allActed
+      ? "All 6 alerts reviewed. Click to submit week."
+      : "Choose an action for all 6 alerts to submit";
+  }
+
+  // --- TAB 2: Customer Notifications ---
+  function switchTab2Subview(subview) {
+    appState.tab2Subview = subview;
+    if (subview === "inboxes") {
+      dom.segInboxesBtn.classList.add("active");
+      dom.segInboxesBtn.setAttribute("aria-selected", "true");
+      dom.segComposeBtn.classList.remove("active");
+      dom.segComposeBtn.setAttribute("aria-selected", "false");
+      dom.subviewInboxes.classList.remove("hidden");
+      dom.subviewCompose.classList.add("hidden");
+      renderTab2Inboxes();
+    } else {
+      dom.segComposeBtn.classList.add("active");
+      dom.segComposeBtn.setAttribute("aria-selected", "true");
+      dom.segInboxesBtn.classList.remove("active");
+      dom.segInboxesBtn.setAttribute("aria-selected", "false");
+      dom.subviewCompose.classList.remove("hidden");
+      dom.subviewInboxes.classList.add("hidden");
+      renderTab2Compose();
+    }
+  }
+
+  function renderTab2() {
+    renderTab2Inboxes();
+    renderTab2Compose();
+  }
+
+  function renderTab2Inboxes() {
+    const custs = appState.customers;
+    const sel = appState.selectedCustomer;
+    if (!sel) return;
+
+    // Sidebar
+    dom.notifCustList.innerHTML = custs
+      .map((c) => {
+        const isSel = c.id === sel.id;
+        const status = c.status || "not_played";
+        return `
+          <div class="sidebar-cust-item ${isSel ? "selected" : ""}" data-cid="${c.id}">
+            <div class="sidebar-cust-left">
+              <span class="status-dot ${status}"></span>
+              <div>
+                <div class="sidebar-cust-name">${c.name}</div>
+                <div class="sidebar-cust-status">${c.status_label}</div>
+              </div>
+            </div>
+            <span class="phone-count-line">${c.frequency > 0 ? c.frequency + "/wk" : ""}</span>
+          </div>
+        `;
+      })
+      .join("");
+
+    dom.notifCustList.querySelectorAll(".sidebar-cust-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        selectCustomer(item.getAttribute("data-cid"));
+      });
+    });
+
+    // Output Phone Content
+    dom.outPhoneAvatar.textContent = sel.initials;
+    dom.outPhoneName.textContent = sel.name;
+
+    const analysis = sel.analysis;
+    const isUnsub = sel.is_unsubscribed || (analysis && analysis.is_unsubscribed);
+
+    // If Compare with Before is active
+    if (appState.compareWithBefore) {
+      dom.outStatusPill.className = "status-indicator-pill";
+      dom.outStatusPill.textContent = "Standard Broadcast";
+      dom.outPhoneCount.textContent = "12 notifications this week (Unfiltered flood)";
+
+      dom.outNotifsStream.innerHTML = appState.standardBundle
+        .map(
+          (b) => `
+          <div class="output-notif-card">
+            <div class="output-notif-top">
+              <span class="category-tag ${b.type}">
+                ${CATEGORY_ICONS[b.type]}
+                <span>${b.type_name}</span>
+              </span>
+              <span class="notif-time">${b.day}, ${b.time}</span>
+            </div>
+            <div class="sim-notif-text">${b.text}</div>
+          </div>
+        `
+        )
+        .join("");
+
+      dom.continueCustomerBtn.disabled = true;
+      return;
+    }
+
+    // Personalized Schedule Display
+    dom.continueCustomerBtn.disabled = isUnsub || !analysis;
+
+    if (isUnsub) {
+      dom.outStatusPill.className = "status-indicator-pill unsubscribed";
+      dom.outStatusPill.textContent = "Unsubscribed";
+      dom.outPhoneCount.textContent = "No notifications";
+      dom.outNotifsStream.innerHTML = `
+        <div class="empty-phone-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+          <div class="empty-phone-title">No notifications</div>
+          <p>Customer has unsubscribed from all communication.</p>
+        </div>
+      `;
+    } else if (!analysis) {
+      dom.outStatusPill.className = "status-indicator-pill not_played";
+      dom.outStatusPill.textContent = "Not Played";
+      dom.outPhoneCount.textContent = "Complete 5 simulation weeks to personalize";
+      dom.outNotifsStream.innerHTML = `
+        <div class="empty-phone-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <div class="empty-phone-title">No personalized schedule yet</div>
+          <p>Simulate this customer's responses in Tab 1 and run the system.</p>
+        </div>
+      `;
+    } else {
+      const statusClass = analysis.status;
+      dom.outStatusPill.className = `status-indicator-pill ${statusClass}`;
+      dom.outStatusPill.textContent = analysis.status_label;
+      dom.outPhoneCount.textContent = `${analysis.frequency} notifications this week`;
+
+      const notifs = sel.continued_notifications || [];
+      if (notifs.length === 0) {
+        dom.outNotifsStream.innerHTML = `
+          <div class="empty-phone-state">
+            <div class="empty-phone-title">No notifications scheduled</div>
+          </div>
+        `;
+      } else {
+        dom.outNotifsStream.innerHTML = notifs
+          .map(
+            (n) => `
+            <div class="output-notif-card ${n._slideIn ? "slide-in" : ""}">
+              <div class="output-notif-top">
+                <span class="category-tag ${n.type}">
+                  ${CATEGORY_ICONS[n.type]}
+                  <span>${n.type_name}</span>
+                  ${n.is_recheck ? `<span class="recheck-badge">Re-check</span>` : ""}
+                </span>
+                <span class="notif-time">${n.day}, ${n.time}</span>
+              </div>
+              <div class="sim-notif-text">${n.text}</div>
+            </div>
+          `
+          )
+          .join("");
+      }
+    }
+  }
+
+  // --- TAB 2 SUBVIEW 2: Send a Notification ---
+  const cachedRecentActivity = {};
+
+  async function fetchRecentActivity(cid) {
+    try {
+      const res = await fetch(`/api/compose/activity?customer_id=${cid}`);
+      const data = await res.json();
+      if (data.ok) {
+        cachedRecentActivity[cid] = data.items || [];
+        renderRecentActivity(cid);
+      }
+    } catch (e) {
+      console.error("Failed to fetch activity:", e);
+    }
+  }
+
+  function renderRecentActivity(cid) {
+    const items = cachedRecentActivity[cid] || [];
+    if (!dom.recentActivityList) return;
+
+    if (items.length === 0) {
+      dom.recentActivityList.innerHTML = `<div class="recent-act-empty">No recent composed activity for this customer.</div>`;
+      return;
+    }
+
+    dom.recentActivityList.innerHTML = items
+      .map((item) => {
+        let chipHtml = "";
+        let actionLinkHtml = "";
+
+        if (item.status === "sent") {
+          chipHtml = `
+            <span class="recent-act-chip sent">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>Sent now</span>
+            </span>
+          `;
+        } else if (item.status === "scheduled") {
+          chipHtml = `
+            <span class="recent-act-chip scheduled">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>${item.scheduled_time || "Scheduled"}</span>
+            </span>
+          `;
+          actionLinkHtml = `<button type="button" class="recent-act-link btn-cancel-sched" data-item-id="${item.id}">Cancel</button>`;
+        } else if (item.status === "cancelled") {
+          chipHtml = `
+            <span class="recent-act-chip not_sent">
+              <span>Cancelled</span>
+            </span>
+          `;
+        } else {
+          chipHtml = `
+            <span class="recent-act-chip not_sent">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+              <span>Not sent</span>
+            </span>
+          `;
+          actionLinkHtml = `<button type="button" class="recent-act-link btn-override-send" data-item-id="${item.id}">Send anyway</button>`;
+        }
+
+        return `
+          <div class="recent-act-item">
+            <div class="recent-act-left">
+              ${chipHtml}
+              <span class="recent-act-text" title="${item.text}">${item.item || item.type_name}: ${item.highlight || item.text}</span>
+            </div>
+            ${actionLinkHtml}
+          </div>
+        `;
+      })
+      .join("");
+
+    dom.recentActivityList.querySelectorAll(".btn-cancel-sched").forEach((btn) => {
+      btn.addEventListener("click", () => handleCancelSchedule(btn.getAttribute("data-item-id")));
+    });
+    dom.recentActivityList.querySelectorAll(".btn-override-send").forEach((btn) => {
+      btn.addEventListener("click", () => handleOverride(btn.getAttribute("data-item-id")));
+    });
+  }
+
+  function renderTab2Compose() {
+    if (!dom.composeActiveLayout) return;
+
+    if (!appState.systemRun) {
+      dom.composePrereqBanner.classList.remove("hidden");
+      dom.composeActiveLayout.classList.add("hidden");
+      return;
+    }
+
+    dom.composePrereqBanner.classList.add("hidden");
+    dom.composeActiveLayout.classList.remove("hidden");
+
+    // 1. Customer Select Options
+    const custs = appState.customers;
+    const currentCompId = appState.composeState.customerId || (appState.selectedCustomer ? appState.selectedCustomer.id : (custs[0] ? custs[0].id : "aarav"));
+    appState.composeState.customerId = currentCompId;
+
+    dom.composeCustomerSelect.innerHTML = custs
+      .map((c) => {
+        const isSel = c.id === currentCompId;
+        const unsubText = c.is_unsubscribed ? " (Unsubscribed)" : "";
+        const role = c.role_hint ? ` — ${c.role_hint}` : "";
+        const style = c.is_unsubscribed ? "style='color:var(--text-muted);'" : "";
+        return `<option value="${c.id}" ${isSel ? "selected" : ""} ${style}>${c.name}${role}${unsubText}</option>`;
+      })
+      .join("");
+
+    const compCust = custs.find((c) => c.id === currentCompId) || appState.selectedCustomer;
+    if (dom.composeCustHintText && compCust) {
+      if (compCust.is_unsubscribed) {
+        dom.composeCustHintText.textContent = `${compCust.name} has unsubscribed. All alerts will be rejected.`;
+      } else if (compCust.analysis && compCust.analysis.risk_level === "High") {
+        dom.composeCustHintText.textContent = `${compCust.name} is close to leaving (${compCust.role_hint}). Only Order Updates can be sent.`;
+      } else if (compCust.id === "aarav") {
+        dom.composeCustHintText.textContent = `Aarav loves offers & sales! Try generating an Offer in the morning.`;
+      } else if (compCust.id === "kabir") {
+        dom.composeCustHintText.textContent = `Kabir likes price drops, but ignores offers. Usually active in the morning.`;
+      } else if (compCust.id === "diya") {
+        dom.composeCustHintText.textContent = `Diya only cares about Order Updates. Promotional alerts will be blocked to prevent churn.`;
+      } else if (compCust.id === "sanya") {
+        dom.composeCustHintText.textContent = `Sanya is a fan of New Arrivals! Try generating a New Arrival alert.`;
+      } else if (compCust.id === "vivaan") {
+        dom.composeCustHintText.textContent = `Vivaan is highly engaged and opens most notifications.`;
+      } else if (compCust.id === "anaya") {
+        dom.composeCustHintText.textContent = `Anaya skims quickly and taps Price Drops.`;
+      } else if (compCust.id === "meera") {
+        dom.composeCustHintText.textContent = `Meera loves offers! Try generating an Offer alert.`;
+      } else if (compCust.id === "ishita" || compCust.id === "rohan") {
+        dom.composeCustHintText.textContent = `${compCust.name} is at risk of leaving (${compCust.role_hint}). Try sending an Order Update.`;
+      } else {
+        dom.composeCustHintText.textContent = `${compCust.name}: ${compCust.role_hint || "Test personalized delivery"}.`;
+      }
+    }
+
+    // 2. Notification Type Chips
+    dom.composeTypeChips.querySelectorAll(".chip-option-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.getAttribute("data-type") === appState.composeState.type);
+    });
+
+    // 3. Category Chips
+    dom.composeCategoryChips.querySelectorAll(".chip-option-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.getAttribute("data-cat") === appState.composeState.category);
+    });
+
+    // 4. Items Select (dependent on category)
+    const validItems = COMPOSE_CATEGORY_ITEMS[appState.composeState.category] || [];
+    if (!validItems.includes(appState.composeState.item)) {
+      appState.composeState.item = validItems[0] || "";
+    }
+    dom.composeItemSelect.innerHTML = validItems
+      .map((item) => `<option value="${item}" ${item === appState.composeState.item ? "selected" : ""}>${item}</option>`)
+      .join("");
+
+    // 5. Highlights Select (dependent on type)
+    const validHighlights = COMPOSE_TYPE_HIGHLIGHTS[appState.composeState.type] || [];
+    if (!validHighlights.includes(appState.composeState.highlight)) {
+      appState.composeState.highlight = validHighlights[0] || "";
+    }
+    dom.composeHighlightSelect.innerHTML = validHighlights
+      .map((h) => `<option value="${h}" ${h === appState.composeState.highlight ? "selected" : ""}>${h}</option>`)
+      .join("");
+
+    // 6. Urgency (Fixed essential if Order Update)
+    if (appState.composeState.type === "order_update") {
+      dom.composeUrgencyChips.classList.add("hidden");
+      dom.composeEssentialNote.classList.remove("hidden");
+      appState.composeState.urgency = "essential";
+    } else {
+      dom.composeUrgencyChips.classList.remove("hidden");
+      dom.composeEssentialNote.classList.add("hidden");
+      if (appState.composeState.urgency === "essential") {
+        appState.composeState.urgency = "normal";
+      }
+      dom.composeUrgencyChips.querySelectorAll(".chip-option-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.getAttribute("data-urgency") === appState.composeState.urgency);
+      });
+    }
+
+    // Button disabled state
+    dom.composeGenerateBtn.disabled = appState.composeState.isSubmitting || !appState.composeState.item || !appState.composeState.highlight;
+
+    // Right Column Preview
+    const compCust = custs.find((c) => c.id === currentCompId) || appState.selectedCustomer;
+    if (compCust) {
+      dom.compPhoneAvatar.textContent = compCust.initials;
+      dom.compPhoneName.textContent = compCust.name;
+      dom.recActCustName.textContent = compCust.name;
+
+      const isUnsub = compCust.is_unsubscribed || (compCust.analysis && compCust.analysis.is_unsubscribed);
+      const notifs = compCust.continued_notifications || [];
+
+      if (isUnsub) {
+        dom.compStatusPill.className = "status-indicator-pill unsubscribed";
+        dom.compStatusPill.textContent = "Unsubscribed";
+        dom.compPhoneCount.textContent = "No notifications";
+        dom.compNotifsStream.innerHTML = `
+          <div class="empty-phone-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+            </svg>
+            <div class="empty-phone-title">No notifications</div>
+            <p>Customer has unsubscribed from all communication.</p>
+          </div>
+        `;
+      } else {
+        const statusClass = compCust.analysis ? compCust.analysis.status : (compCust.status || "not_played");
+        dom.compStatusPill.className = `status-indicator-pill ${statusClass}`;
+        dom.compStatusPill.textContent = compCust.status_label || (compCust.analysis ? compCust.analysis.status_label : "Not played");
+        dom.compPhoneCount.textContent = `${notifs.length} notifications this week`;
+
+        if (notifs.length === 0) {
+          dom.compNotifsStream.innerHTML = `
+            <div class="empty-phone-state">
+              <div class="empty-phone-title">No notifications scheduled</div>
+              <p>Generate a notification on the left to test delivery.</p>
+            </div>
+          `;
+        } else {
+          dom.compNotifsStream.innerHTML = notifs
+            .map(
+              (n) => `
+              <div class="output-notif-card ${n._slideIn ? "slide-in" : ""}">
+                <div class="output-notif-top">
+                  <span class="category-tag ${n.type}">
+                    ${CATEGORY_ICONS[n.type]}
+                    <span>${n.type_name}</span>
+                    ${n.is_recheck ? `<span class="recheck-badge">Re-check</span>` : ""}
+                  </span>
+                  <span class="notif-time">${n.day}, ${n.time}</span>
+                </div>
+                <div class="sim-notif-text">${n.text}</div>
+              </div>
+            `
+            )
+            .join("");
+        }
+      }
+
+      fetchRecentActivity(currentCompId);
+    }
+
+    // Demo Time Buttons active state
+    dom.demoTimeSelector.querySelectorAll(".demo-time-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.getAttribute("data-time") === appState.demoTime);
+    });
+  }
+
+  // --- Modals & Toasts ---
+  function showToast(message, type = "success") {
+    if (!dom.toastContainer) return;
+    const toast = document.createElement("div");
+    toast.className = `toast-item toast-${type}`;
+    const icon = type === "success"
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;color:var(--status-green);flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`
+      : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;color:var(--accent-primary);flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`;
+    toast.innerHTML = `${icon}<span>${message}</span>`;
+    dom.toastContainer.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transition = "opacity 0.3s ease";
+      setTimeout(() => toast.remove(), 300);
+    }, 3500);
+  }
+
+  function openModal(modalEl) {
+    if (appState.activeModal) {
+      appState.activeModal.classList.add("hidden");
+    }
+    modalEl.classList.remove("hidden");
+    appState.activeModal = modalEl;
+    const focusable = modalEl.querySelector("button, [tabindex='0']");
+    if (focusable) focusable.focus();
+  }
+
+  function closeModal(modalEl) {
+    modalEl.classList.add("hidden");
+    if (appState.activeModal === modalEl) {
+      appState.activeModal = null;
+    }
+  }
+
+  let pendingOverrideItemId = null;
+
+  async function handleGenerateNotification() {
+    if (appState.composeState.isSubmitting) return;
+    appState.composeState.isSubmitting = true;
+    renderTab2Compose();
+
+    try {
+      const payload = {
+        customer_id: appState.composeState.customerId,
+        type: appState.composeState.type,
+        category: appState.composeState.category,
+        item: appState.composeState.item,
+        highlight: appState.composeState.highlight,
+        urgency: appState.composeState.urgency,
+        demo_time: appState.demoTime
+      };
+
+      const res = await fetch("/api/compose/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.ok) {
+        let msg = data.detail || "Could not generate notification";
+        if (msg === "Not Found" || res.status === 404) {
+          msg = "Please ensure the system is running and refresh the page.";
+        }
+        showToast(msg, "info");
+        return;
+      }
+
+      appState.composeState.lastEvaluatedItem = data.item;
+      await fetchState();
+
+      if (data.item.decision === "send_now") {
+        const compCust = appState.customers.find((c) => c.id === appState.composeState.customerId);
+        if (compCust && compCust.continued_notifications && compCust.continued_notifications.length > 0) {
+          compCust.continued_notifications[0]._slideIn = true;
+        }
+        renderTab2();
+        showToast(`Sent to ${data.item.customer_name}`, "success");
+      } else if (data.item.decision === "schedule") {
+        dom.modalSchedCust.textContent = `Customer: ${data.item.customer_name}`;
+        dom.modalSchedTime.textContent = data.item.scheduled_time || "Scheduled";
+        dom.modalSchedReason.textContent = data.item.reason;
+        dom.modalSchedPreview.textContent = data.item.text;
+        openModal(dom.modalScheduled);
+      } else {
+        dom.modalNotSentCust.textContent = `Customer: ${data.item.customer_name}`;
+        dom.modalNotSentReason.textContent = data.item.reason;
+        dom.modalNotSentPreview.textContent = data.item.text;
+        openModal(dom.modalNotSent);
+      }
+
+      fetchRecentActivity(appState.composeState.customerId);
+    } catch (err) {
+      console.error("Failed to generate notification:", err);
+      showToast("Failed to generate notification", "info");
+    } finally {
+      appState.composeState.isSubmitting = false;
+      renderTab2Compose();
+    }
+  }
+
+  function handleOverride(itemId) {
+    pendingOverrideItemId = itemId;
+    openModal(dom.modalConfirmOverride);
+  }
+
+  async function executeOverride(itemId) {
+    try {
+      const res = await fetch("/api/compose/override", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id: itemId })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        closeModal(dom.modalConfirmOverride);
+        if (dom.modalScheduled) closeModal(dom.modalScheduled);
+        if (dom.modalNotSent) closeModal(dom.modalNotSent);
+
+        await fetchState();
+        const compCust = appState.customers.find((c) => c.id === data.item.customer_id);
+        if (compCust && compCust.continued_notifications && compCust.continued_notifications.length > 0) {
+          compCust.continued_notifications[0]._slideIn = true;
+        }
+        renderTab2();
+        showToast(`Sent to ${data.item.customer_name}`, "success");
+        fetchRecentActivity(data.item.customer_id);
+      }
+    } catch (e) {
+      console.error("Override failed:", e);
+    }
+  }
+
+  async function handleCancelSchedule(itemId) {
+    try {
+      const res = await fetch("/api/compose/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id: itemId })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        closeModal(dom.modalScheduled);
+        fetchRecentActivity(appState.composeState.customerId);
+        showToast("Schedule cancelled", "info");
+      }
+    } catch (e) {
+      console.error("Cancel failed:", e);
+    }
+  }
+
+  async function handleAdvanceDemoTime(timeSlot) {
+    try {
+      appState.demoTime = timeSlot;
+      dom.demoTimeSelector.querySelectorAll(".demo-time-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.getAttribute("data-time") === timeSlot);
+      });
+
+      const res = await fetch("/api/compose/advance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ demo_time: timeSlot })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        await fetchState();
+        if (data.delivered_items && data.delivered_items.length > 0) {
+          data.delivered_items.forEach((item) => {
+            showToast(`Scheduled notification delivered to ${item.customer_name}`, "success");
+          });
+          const compCust = appState.customers.find((c) => c.id === appState.composeState.customerId);
+          if (compCust && compCust.continued_notifications && compCust.continued_notifications.length > 0) {
+            compCust.continued_notifications[0]._slideIn = true;
+          }
+        }
+        renderTab2();
+        fetchRecentActivity(appState.composeState.customerId);
+      }
+    } catch (e) {
+      console.error("Advance failed:", e);
+    }
+  }
+
+  // --- TAB 3: Customer Insights ---
+  function renderTab3() {
+    const metrics = appState.summaryMetrics;
+    dom.metricEngaged.textContent = metrics.engaged || 0;
+    dom.metricLosing.textContent = metrics.losing_interest || 0;
+    dom.metricRisk.textContent = metrics.at_risk || 0;
+    dom.metricUnsub.textContent = metrics.unsubscribed || 0;
+    dom.metricAvoided.textContent = metrics.total_avoided || 0;
+
+    const custs = appState.customers;
+    const sel = appState.selectedCustomer;
+    if (!sel) return;
+
+    // Sidebar
+    dom.insightsCustList.innerHTML = custs
+      .map((c) => {
+        const isSel = c.id === sel.id;
+        const status = c.status || "not_played";
+        return `
+          <div class="sidebar-cust-item ${isSel ? "selected" : ""}" data-cid="${c.id}">
+            <div class="sidebar-cust-left">
+              <span class="status-dot ${status}"></span>
+              <div>
+                <div class="sidebar-cust-name">${c.name}</div>
+                <div class="sidebar-cust-status">${c.status_label}</div>
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+
+    dom.insightsCustList.querySelectorAll(".sidebar-cust-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        selectCustomer(item.getAttribute("data-cid"));
+      });
+    });
+
+    const analysis = sel.analysis;
+    dom.insAvatar.textContent = sel.initials;
+    dom.insName.textContent = sel.name;
+
+    if (!analysis) {
+      dom.insTopInterest.textContent = "Run system in Tab 1 to generate insights";
+      dom.insStatusBadge.className = "ins-status-badge not_played";
+      dom.insStatusBadge.textContent = "Not Played";
+      dom.insInterestsList.innerHTML = `<p style="color:var(--text-muted);font-size:0.85rem;">No data yet.</p>`;
+      dom.insChartContainer.innerHTML = `<p style="color:var(--text-muted);font-size:0.85rem;">No activity.</p>`;
+      dom.insLikelyBehavior.textContent = "Awaiting customer simulation.";
+      dom.insObservationsList.innerHTML = `<li>Complete all 5 weeks to run the system.</li>`;
+      dom.insFrequencyLine.textContent = "—";
+      dom.insDecisionsContainer.innerHTML = "";
+      dom.insRecActionTitle.textContent = "Simulation required";
+      dom.insRecActionDesc.textContent = "Simulate 5 weeks of customer interaction first.";
+      return;
+    }
+
+    // Status Badge
+    dom.insStatusBadge.className = `ins-status-badge ${analysis.status}`;
+    dom.insStatusBadge.textContent = analysis.status_label;
+    dom.insTopInterest.textContent = `Top interest: ${analysis.top_interest}`;
+
+    // 1. Interests Bars
+    const interests = analysis.interests;
+    dom.insInterestsList.innerHTML = Object.keys(interests)
+      .map((k) => {
+        const item = interests[k];
+        const lvlClass = item.level.toLowerCase();
+        return `
+          <div class="interest-item">
+            <div class="interest-meta">
+              <span>${item.display_name}</span>
+              <span>${item.level}</span>
+            </div>
+            <div class="interest-bar-track">
+              <div class="interest-bar-fill ${lvlClass}"></div>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+
+    // 2. Engagement Over Time (Clean Inline SVG Sparkline)
+    const trendClass = analysis.trend.toLowerCase();
+    dom.insTrendBadge.className = `trend-badge ${trendClass}`;
+    dom.insTrendBadge.textContent = analysis.trend;
+
+    const weeksData = analysis.week_engagements || [0, 0, 0, 0, 0];
+    dom.insChartContainer.innerHTML = renderSparklineSvg(weeksData);
+
+    // 3. Likely Behaviour & Risk
+    const riskClass = analysis.risk_level.toLowerCase();
+    dom.insRiskBadge.className = `risk-badge ${riskClass}`;
+    dom.insRiskBadge.textContent = `Risk: ${analysis.risk_level}`;
+    dom.insLikelyBehavior.textContent = analysis.likely_behavior;
+
+    // 4. Key Observations
+    dom.insObservationsList.innerHTML = (analysis.observations || [])
+      .map((obs) => `<li>${obs}</li>`)
+      .join("");
+
+    // 5. Decisions
+    dom.insFrequencyLine.innerHTML = `<strong>${analysis.frequency} notifications per week</strong>`;
+    let decisionsHtml = "";
+
+    (analysis.continued_types || []).forEach((c) => {
+      decisionsHtml += `
+        <div class="decision-row">
+          <span class="decision-badge continued">Continued</span>
+          <div class="decision-desc">
+            <strong>${c.name}</strong>
+            <span>${c.reason}</span>
+          </div>
+        </div>
+      `;
+    });
+
+    (analysis.paused_types || []).forEach((p) => {
+      decisionsHtml += `
+        <div class="decision-row">
+          <span class="decision-badge paused">Paused</span>
+          <div class="decision-desc">
+            <strong>${p.name}</strong>
+            <span>${p.reason}</span>
+          </div>
+        </div>
+      `;
+    });
+
+    dom.insDecisionsContainer.innerHTML = decisionsHtml;
+
+    // 6. Recommended Action
+    dom.insRecActionTitle.textContent = analysis.recommended_action;
+    if (analysis.recommended_action === "No action needed") {
+      dom.insRecActionDesc.textContent = "Customer is naturally engaged. Maintain the personalized notification schedule.";
+    } else if (analysis.recommended_action === "Reduce frequency") {
+      dom.insRecActionDesc.textContent = "Engagement is cooling down. Focus only on top interest categories at a lower cadence.";
+    } else if (analysis.recommended_action === "Send a re-engagement message") {
+      dom.insRecActionDesc.textContent = "Customer is at immediate risk of leaving. Pause promotional noise and send an essential re-engagement offer.";
+    } else {
+      dom.insRecActionDesc.textContent = "Customer has opted out of all notifications.";
+    }
+  }
+
+  function renderSparklineSvg(data) {
+    const width = 340;
+    const height = 120;
+    const padding = 20;
+
+    const points = data.map((val, idx) => {
+      const x = padding + (idx * (width - 2 * padding)) / (data.length - 1);
+      const y = height - padding - val * (height - 2 * padding);
+      return { x, y, val };
+    });
+
+    const pathD = points
+      .map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`)
+      .join(" ");
+
+    const circles = points
+      .map(
+        (pt, i) => `
+        <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="4.5" fill="var(--accent-primary)"/>
+        <text x="${pt.x.toFixed(1)}" y="${height - 4}" text-anchor="middle" font-size="10" font-weight="600" fill="var(--text-muted)">W${i + 1}</text>
+      `
+      )
+      .join("");
+
+    return `
+      <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="overflow:visible;">
+        <line x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}" stroke="var(--border-light)" stroke-width="1.5" stroke-dasharray="3 3"/>
+        <line x1="${padding}" y1="${padding}" x2="${width - padding}" y2="${padding}" stroke="var(--border-light)" stroke-width="1.5" stroke-dasharray="3 3"/>
+        <path d="${pathD}" fill="none" stroke="var(--accent-primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        ${circles}
+      </svg>
+    `;
+  }
+
+  // =========================================================================
+  // CONTINUED ROUND (TAB 2)
+  // =========================================================================
+
+  function openContinuedDrawer() {
+    const sel = appState.selectedCustomer;
+    if (!sel || !sel.continued_notifications) return;
+
+    dom.contCustName.textContent = sel.name;
+    dom.continuedDrawer.classList.remove("hidden");
+
+    dom.contNotifsStream.innerHTML = sel.continued_notifications
+      .map(
+        (n) => `
+        <div class="sim-notif-card" data-cid="${n.id}">
+          <div class="sim-notif-top">
+            <span class="category-tag ${n.type}">
+              ${CATEGORY_ICONS[n.type]}
+              <span>${n.type_name}</span>
+              ${n.is_recheck ? `<span class="recheck-badge">Re-check alert</span>` : ""}
+            </span>
+            <span class="notif-time">${n.day}, ${n.time}</span>
+          </div>
+          <div class="sim-notif-text">${n.text}</div>
+          
+          <div class="action-buttons-group">
+            <button type="button" class="act-btn" data-act="opened">Open</button>
+            <button type="button" class="act-btn" data-act="ignored">Ignore</button>
+            <button type="button" class="act-btn" data-act="dismissed">Dismiss</button>
+            <button type="button" class="act-btn danger" data-act="muted">Mute</button>
+            <button type="button" class="act-btn danger" data-act="unsubscribed">Unsubscribe</button>
+          </div>
+        </div>
+      `
+      )
+      .join("");
+
+    attachDrawerListeners();
+  }
+
+  function attachDrawerListeners() {
+    const stream = dom.contNotifsStream;
+    stream.querySelectorAll(".act-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const card = e.target.closest(".sim-notif-card");
+        card.querySelectorAll(".act-btn").forEach((b) => b.classList.remove("active"));
+        e.target.classList.add("active");
+
+        const allChecked = Array.from(stream.querySelectorAll(".sim-notif-card")).every((c) =>
+          c.querySelector(".act-btn.active")
+        );
+        dom.contSubmitBtn.disabled = !allChecked;
+      });
+    });
+  }
+
+  async function submitContinuedDrawer() {
+    const sel = appState.selectedCustomer;
+    if (!sel) return;
+
+    const cards = dom.contNotifsStream.querySelectorAll(".sim-notif-card");
+    const actions = [];
+    cards.forEach((c) => {
+      const id = c.getAttribute("data-cid");
+      const activeBtn = c.querySelector(".act-btn.active");
+      const act = activeBtn ? activeBtn.getAttribute("data-act") : "ignored";
+      actions.push({ id, action: act });
+    });
+
+    try {
+      await fetch(`/api/customer/${sel.id}/continue-act`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actions })
+      });
+      dom.continuedDrawer.classList.add("hidden");
+      await fetchState();
+    } catch (err) {
+      console.error("Failed to submit continued actions:", err);
+    }
+  }
+
+  // =========================================================================
+  // 60-SECOND AUTO DEMO MODE
+  // =========================================================================
+
+  async function startAutoDemo() {
+    appState.autoDemoRunning = true;
+    appState.autoDemoPaused = false;
+    appState.autoDemoStep = 0;
+
+    dom.demoController.classList.remove("hidden");
+    dom.demoPauseBtn.textContent = "Pause";
+
+    runAutoDemoFlow();
+  }
+
+  function stopAutoDemo() {
+    appState.autoDemoRunning = false;
+    appState.autoDemoPaused = false;
+    clearTimeout(appState.autoDemoTimer);
+    dom.demoController.classList.add("hidden");
+    dom.demoProgressFill.style.width = "0%";
+  }
+
+  function togglePauseAutoDemo() {
+    if (!appState.autoDemoRunning) return;
+    appState.autoDemoPaused = !appState.autoDemoPaused;
+    dom.demoPauseBtn.textContent = appState.autoDemoPaused ? "Resume" : "Pause";
+    if (!appState.autoDemoPaused) {
+      runAutoDemoFlow();
+    }
+  }
+
+  async function waitAutoDemo(ms) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const check = () => {
+        if (!appState.autoDemoRunning) return;
+        if (appState.autoDemoPaused) {
+          appState.autoDemoTimer = setTimeout(check, 200);
+          return;
+        }
+        if (Date.now() - start >= ms) {
+          resolve();
+        } else {
+          appState.autoDemoTimer = setTimeout(check, 100);
+        }
+      };
+      check();
+    });
+  }
+
+  async function runAutoDemoFlow() {
+    const steps = [
+      {
+        text: "Step 1: Navigating to Tab 1 (Simulate Customers)...",
+        pct: 10,
+        action: async () => {
+          switchTab("tab-simulate");
+          appState.roleHintsVisible = true;
+          dom.roleHintsToggle.checked = true;
+          renderTab1();
+          await waitAutoDemo(4000);
+        }
+      },
+      {
+        text: "Step 2: Loading sample behavior for all scripted personas...",
+        pct: 25,
+        action: async () => {
+          await loadSampleBehaviour();
+          await waitAutoDemo(4000);
+        }
+      },
+      {
+        text: "Step 3: Running ShopEasy intelligence engine...",
+        pct: 45,
+        action: async () => {
+          await runSystem();
+          await waitAutoDemo(4000);
+        }
+      },
+      {
+        text: "Step 4: Comparing Aarav (Offers) vs Diya (Order Updates Only)...",
+        pct: 60,
+        action: async () => {
+          switchTab("tab-notifications");
+          await selectCustomer("aarav");
+          await waitAutoDemo(4000);
+          await selectCustomer("diya");
+          await waitAutoDemo(4000);
+          await selectCustomer("arjun");
+          await waitAutoDemo(4000);
+        }
+      },
+      {
+        text: "Step 5: Comparing against before (Generic 12-alert flood)...",
+        pct: 75,
+        action: async () => {
+          dom.compareToggle.checked = true;
+          appState.compareWithBefore = true;
+          renderTab2();
+          await waitAutoDemo(5000);
+          dom.compareToggle.checked = false;
+          appState.compareWithBefore = false;
+          renderTab2();
+          await waitAutoDemo(3000);
+        }
+      },
+      {
+        text: "Step 6: Inspecting Customer Insights in Tab 3...",
+        pct: 90,
+        action: async () => {
+          switchTab("tab-insights");
+          await selectCustomer("rohan");
+          await waitAutoDemo(5000);
+          await selectCustomer("meera");
+          await waitAutoDemo(5000);
+          await selectCustomer("ishita");
+          await waitAutoDemo(4000);
+        }
+      },
+      {
+        text: "Auto Demo Complete! Feel free to explore freely.",
+        pct: 100,
+        action: async () => {
+          await waitAutoDemo(3000);
+          stopAutoDemo();
+        }
+      }
+    ];
+
+    while (appState.autoDemoStep < steps.length && appState.autoDemoRunning) {
+      const curStep = steps[appState.autoDemoStep];
+      dom.demoStatusText.textContent = curStep.text;
+      dom.demoProgressFill.style.width = `${curStep.pct}%`;
+      await curStep.action();
+      appState.autoDemoStep++;
+    }
+  }
+
+  // =========================================================================
+  // EVENT LISTENERS
+  // =========================================================================
+
+  function setupEventListeners() {
+    // Tab switching
+    dom.tabBtns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        switchTab(btn.getAttribute("data-tab"));
+      });
+    });
+
+    // Theme toggle
+    dom.themeToggleBtn.addEventListener("click", toggleTheme);
+
+    // Keyboard navigation
+    window.addEventListener("keydown", handleKeyboardNav);
+
+    // Reset Modal
+    dom.resetBtn.addEventListener("click", () => {
+      dom.resetModal.classList.remove("hidden");
+    });
+    dom.resetCancelBtn.addEventListener("click", () => {
+      dom.resetModal.classList.add("hidden");
+    });
+    dom.resetConfirmBtn.addEventListener("click", resetDemo);
+
+    // Auto Demo Controls
+    dom.autoDemoBtn.addEventListener("click", startAutoDemo);
+    dom.demoStopBtn.addEventListener("click", stopAutoDemo);
+    dom.demoPauseBtn.addEventListener("click", togglePauseAutoDemo);
+
+    // Role hints toggle
+    dom.roleHintsToggle.addEventListener("change", (e) => {
+      appState.roleHintsVisible = e.target.checked;
+      renderTab1();
+    });
+
+    // Play selected customer button
+    dom.playCustomerBtn.addEventListener("click", () => {
+      if (appState.selectedCustomer) {
+        autoPlayCustomer(appState.selectedCustomer.id);
+      }
+    });
+
+    // Load sample behaviour
+    dom.loadSampleBtn.addEventListener("click", loadSampleBehaviour);
+
+    // Submit week button in phone
+    dom.submitWeekBtn.addEventListener("click", () => {
+      if (!appState.selectedCustomer) return;
+      const actions = (appState.selectedCustomer.active_week_notifications || []).map((n) => ({
+        id: n.id,
+        action: n.action,
+        duration: n.duration,
+        timing: n.timing,
+        clicked: n.clicked,
+        saved: n.saved
+      }));
+      submitWeekActions(appState.selectedCustomer.id, actions);
+    });
+
+    // Run system button
+    dom.runSystemBtn.addEventListener("click", runSystem);
+
+    // Compare with before toggle
+    dom.compareToggle.addEventListener("change", (e) => {
+      appState.compareWithBefore = e.target.checked;
+      renderTab2();
+    });
+
+    // Continue as this customer button
+    dom.continueCustomerBtn.addEventListener("click", openContinuedDrawer);
+    dom.contCancelBtn.addEventListener("click", () => {
+      dom.continuedDrawer.classList.add("hidden");
+    });
+    dom.contSubmitBtn.addEventListener("click", submitContinuedDrawer);
+
+    // Tab 2 Segmented Control
+    if (dom.segInboxesBtn && dom.segComposeBtn) {
+      dom.segInboxesBtn.addEventListener("click", () => switchTab2Subview("inboxes"));
+      dom.segComposeBtn.addEventListener("click", () => switchTab2Subview("compose"));
+    }
+
+    // Compose Prereq Button
+    if (dom.composeGoSimBtn) {
+      dom.composeGoSimBtn.addEventListener("click", () => switchTab("tab-simulate"));
+    }
+
+    // Compose Customer Select
+    if (dom.composeCustomerSelect) {
+      dom.composeCustomerSelect.addEventListener("change", async (e) => {
+        appState.composeState.customerId = e.target.value;
+        await selectCustomer(e.target.value);
+        renderTab2Compose();
+      });
+    }
+
+    // Compose Notification Type Chips
+    if (dom.composeTypeChips) {
+      dom.composeTypeChips.querySelectorAll(".chip-option-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          appState.composeState.type = btn.getAttribute("data-type");
+          renderTab2Compose();
+        });
+      });
+    }
+
+    // Compose Category Chips
+    if (dom.composeCategoryChips) {
+      dom.composeCategoryChips.querySelectorAll(".chip-option-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          appState.composeState.category = btn.getAttribute("data-cat");
+          renderTab2Compose();
+        });
+      });
+    }
+
+    // Compose Item Select
+    if (dom.composeItemSelect) {
+      dom.composeItemSelect.addEventListener("change", (e) => {
+        appState.composeState.item = e.target.value;
+        dom.composeGenerateBtn.disabled = appState.composeState.isSubmitting || !appState.composeState.item || !appState.composeState.highlight;
+      });
+    }
+
+    // Compose Highlight Select
+    if (dom.composeHighlightSelect) {
+      dom.composeHighlightSelect.addEventListener("change", (e) => {
+        appState.composeState.highlight = e.target.value;
+        dom.composeGenerateBtn.disabled = appState.composeState.isSubmitting || !appState.composeState.item || !appState.composeState.highlight;
+      });
+    }
+
+    // Compose Urgency Chips
+    if (dom.composeUrgencyChips) {
+      dom.composeUrgencyChips.querySelectorAll(".chip-option-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          appState.composeState.urgency = btn.getAttribute("data-urgency");
+          renderTab2Compose();
+        });
+      });
+    }
+
+    // Generate Notification Button
+    if (dom.composeGenerateBtn) {
+      dom.composeGenerateBtn.addEventListener("click", handleGenerateNotification);
+    }
+
+    // Demo Time Buttons
+    if (dom.demoTimeSelector) {
+      dom.demoTimeSelector.querySelectorAll(".demo-time-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          handleAdvanceDemoTime(btn.getAttribute("data-time"));
+        });
+      });
+    }
+
+    // Scheduled Modal buttons
+    if (dom.modalSchedOkBtn) {
+      dom.modalSchedOkBtn.addEventListener("click", () => closeModal(dom.modalScheduled));
+    }
+    if (dom.modalSchedCancelBtn) {
+      dom.modalSchedCancelBtn.addEventListener("click", () => {
+        if (appState.composeState.lastEvaluatedItem) {
+          handleCancelSchedule(appState.composeState.lastEvaluatedItem.id);
+        }
+      });
+    }
+    if (dom.modalSchedOverrideBtn) {
+      dom.modalSchedOverrideBtn.addEventListener("click", () => {
+        if (appState.composeState.lastEvaluatedItem) {
+          handleOverride(appState.composeState.lastEvaluatedItem.id);
+        }
+      });
+    }
+
+    // Not Sent Modal buttons
+    if (dom.modalNotSentOkBtn) {
+      dom.modalNotSentOkBtn.addEventListener("click", () => closeModal(dom.modalNotSent));
+    }
+    if (dom.modalNotSentOverrideBtn) {
+      dom.modalNotSentOverrideBtn.addEventListener("click", () => {
+        if (appState.composeState.lastEvaluatedItem) {
+          handleOverride(appState.composeState.lastEvaluatedItem.id);
+        }
+      });
+    }
+
+    // Confirm Override Modal buttons
+    if (dom.modalConfirmCancelBtn) {
+      dom.modalConfirmCancelBtn.addEventListener("click", () => closeModal(dom.modalConfirmOverride));
+    }
+    if (dom.modalConfirmProceedBtn) {
+      dom.modalConfirmProceedBtn.addEventListener("click", () => {
+        if (pendingOverrideItemId) {
+          executeOverride(pendingOverrideItemId);
+        }
+      });
+    }
+
+    // Modal Backdrop clicks to close
+    [dom.modalScheduled, dom.modalNotSent, dom.modalConfirmOverride].forEach((m) => {
+      if (m) {
+        m.addEventListener("click", (e) => {
+          if (e.target === m) closeModal(m);
+        });
+      }
+    });
+  }
+
+  // Kickoff on load
+  document.addEventListener("DOMContentLoaded", init);
+})();

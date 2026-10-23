@@ -92,12 +92,12 @@ def test_ishita_declining(engine):
 def test_rohan_ignores_from_week_2(engine):
     history, unsub = simulate_full_history("rohan")
     res = engine.analyze_customer("rohan", "Rohan", history, unsub)
-    # High-risk suppression cannot be contradicted by a promotional recovery message.
+    # Rohan is red with order updates only and the action "Send a re-engagement message"
     cont_types = [c["type"] for c in res["continued_types"]]
     assert res["status"] == "at_risk"
     assert res["risk_level"] == "High"
     assert cont_types == ["order_update"]
-    assert res["recommended_action"] == "Pause promotions"
+    assert res["recommended_action"] == "Send a re-engagement message"
 
 
 def test_meera_recovering_with_offers(engine):
@@ -141,11 +141,11 @@ def test_anaya_taps_price_drops(engine):
 def test_arjun_unsubscribed(engine):
     history, unsub = simulate_full_history("arjun")
     res = engine.analyze_customer("arjun", "Arjun", history, unsub)
-    # Promotional unsubscribe stops promotions; order lifecycle updates remain eligible.
+    # Arjun is unsubscribed with no notifications
     assert res["is_unsubscribed"] is True
     assert res["status"] == "unsubscribed"
     assert res["frequency"] == 0
-    assert [c["type"] for c in res["continued_types"]] == ["order_update"]
+    assert len(res["continued_types"]) == 0
     assert res["avoided_notifications"] == 0
 
 
@@ -192,7 +192,7 @@ def test_edge_case_unsubscribe_week_1(engine):
     res = engine.analyze_customer("guest", "Guest", history, True)
     assert res["is_unsubscribed"] is True
     assert res["frequency"] == 0
-    assert [c["type"] for c in res["continued_types"]] == ["order_update"]
+    assert len(res["continued_types"]) == 0
 
 
 def test_edge_case_partially_completed_weeks(engine):

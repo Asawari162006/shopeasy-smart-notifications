@@ -6,6 +6,3 @@ venv/
 .env
 .env.*
 !.env.example
-data/*.sqlite3*
-reports/.matplotlib/
-.test-tmp*/
